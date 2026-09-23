@@ -42,7 +42,9 @@ void main() {
       expect(coins.id, funded);
       final vout = coins.outputs.indexWhere((o) => FakeChain.paysPKH(o, addr.pubkeyHash160));
       expect(vout, greaterThanOrEqualTo(0));
-      expect(await chain.minedHeight(funded), h0 + 1);
+      // Greater than, not h0 + 1: localnet's autominer may mine its own
+      // blocks while this runs, so only the ordering is ours to assert.
+      expect(await chain.minedHeight(funded), greaterThan(h0));
       expect(await chain.unspent(funded, vout), isTrue);
       final found = await chain.unspentOf(addr);
       expect(found.map((u) => u.outpoint), contains('$funded:$vout'));
@@ -57,7 +59,9 @@ void main() {
       expect(await chain.minedHeight(spend.id), isNull, reason: 'in the mempool, not mined');
       expect(await chain.unspent(funded, vout), isFalse, reason: 'gettxout sees the mempool spend');
       await chain.generate(1);
-      expect(await chain.minedHeight(spend.id), h0 + 2);
+      final spentAt = await chain.minedHeight(spend.id);
+      expect(spentAt, isNotNull, reason: 'mined by the block we just generated');
+      expect(spentAt, greaterThan(await chain.minedHeight(funded) ?? h0));
       expect(await chain.unspent(spend.id, 0), isTrue);
       expect((await chain.unspentOf(addr)).map((u) => u.outpoint), contains('${spend.id}:0'));
 
