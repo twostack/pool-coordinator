@@ -1,5 +1,5 @@
 name: pool_coordinator
-description: The TSL1_SP shielded pool coordinator server: runs a pool over a ricochet inbox and feed, funds and publishes its rounds, and keeps its ledger.
+description: "The TSL1_SP shielded pool coordinator server: runs a pool over a ricochet inbox and feed, funds and publishes its rounds, and keeps its ledger."
 version: 0.1.0
 publish_to: none
 
@@ -11,13 +11,16 @@ dependencies:
     path: ../tstokenlib
   ricochet:
     path: ../ricochet-dart-client
+  dart_libp2p: ^2.0.0
   dartsv: ^3.1.0
   args: ^2.4.2
   yaml: ^3.1.2
   http: ^1.2.0
   convert: ^3.1.2
   crypto: ^3.0.6
+  cryptography: ^2.7.0
   logging: ^1.2.0
+  path: ^1.8.3
 
 dev_dependencies:
   lints: ^2.0.0

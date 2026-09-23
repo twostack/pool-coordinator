@@ -1,0 +1,7 @@
+include: package:lints/recommended.yaml
+
+linter:
+  rules:
+    # The tests build tstokenlib's test chain, which lives in the library's
+    # implementation and test directories rather than its public surface.
+    implementation_imports: false

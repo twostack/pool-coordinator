@@ -1,0 +1,71 @@
+schema: spec-driven
+
+context: |
+  pool-coordinator is the TSL1_SP shielded pool's coordinator server: a Dart 3
+  headless process that runs one pool from tstokenlib's ShieldedCoordinator.
+  The library (../tstokenlib, a path dependency, branch feature/shielded-pool)
+  owns the pool itself: the transfer, ledger, chain reader, scanner, the
+  coordinator (intake, rounds, funding interface, store-before-publish,
+  recovery) and the wallet-to-coordinator protocol (submission, reply,
+  descriptor, announcement as versioned bytes). Their specs are in
+  ../tstokenlib/openspec/specs (pool-transfer, pool-ledger, pool-coordinator,
+  coordinator-service, pool-protocol) and are referenced, never copied. The
+  design record of the pool is ../tstokenlib/docs/ZK_SHIELDED_POOL_TSL1_DESIGN.md
+  (sections 14 and 15 are the pool core and the coordinator); this repo keeps
+  its own running record in docs/DESIGN.md, appended in dated sections.
+
+  Transport: ricochet, a libp2p store-and-forward network. The Go server is
+  ../go-ricochet (Go 1.25, PostgreSQL 14+, UDX on port 55223, Ed25519 peer
+  identities that anyone can mint); the Dart client is ../ricochet-dart-client
+  (path dependency, package `ricochet`: SFClient over a dart_libp2p host the
+  application builds, sendMessage/retrieveMessages/markMessagesDelivered for
+  private mailboxes, appendFeedEntry/getFeedEntries for public feeds; 10 MB
+  frames, 1,000 messages a mailbox until marked delivered, feeds polled by
+  sequence, no push for feeds, errors returned as null). ../overnode_v2 has a
+  working client setup (ricochet_actor.dart) to copy from.
+
+  Chain: ../localnet runs a regtest SV Node 1.2.2 (RPC 18332, user
+  bitcoin:bitcoin) and a patched ARC v1.5.11 (9090); BSV testnet is reached
+  through ARC (TAAL) and WhatsOnChain. ARC's parse limit of 1,636,802 bytes
+  per scriptSig means production-parameter witnesses (1.9 to 3.1 MB unlocks)
+  go through node RPC only; test-parameter transactions fit ARC.
+
+  Measured in the library (2026-09-22, Apple M3 Pro, 12 cores): a production
+  round 254 s on the GPU and 341 s on the CPU from close to witness built,
+  the coordinator's own work about 9 s; intake 18 ms a production transfer;
+  recovery from a 1,000-round snapshot plus two rounds 11.4 s; a production
+  submission 68,972 B, an announcement 338 B, a descriptor 115 B; at
+  1 sat/kB a production round costs about 4,400 sat in fees (Y 1,784, round
+  396, witness 2,205).
+
+  Conventions: commit only when the user asks, on main; never push, merge or
+  open a PR unless asked; commits end with "Co-Authored-By: Claude Fable 5.1
+  <noreply@anthropic.com>" (adjust the model name to the one doing the work);
+  do not commit tool/scratch or .claude/settings.local.json. Run `dart analyze
+  lib bin test` clean before finishing and the suites that touch what changed.
+  Doc comments are prose with a "why"; no em dashes in prose. Secrets (the
+  pool's owner key, the ricochet identity, RPC passwords) never appear in
+  logs, config examples or tests as real values.
+
+rules:
+  proposal:
+    - Name the measured numbers a change is meant to move and the bounds they must stay inside; say which of them the specs make requirements.
+    - Name the tstokenlib specs the change builds on and say what this repo adds that the library deliberately left out.
+  specs:
+    - Requirements describe behaviour a wallet, an operator or the chain relies on; class names are not behaviour.
+    - Each capability states its non-functional contract as requirements with scenarios, answering in turn untrusted input, secrets and privacy, trust, determinism, compatibility, performance and resources, and failure behaviour; say "not applicable" in the proposal rather than silently omitting one.
+    - A bound another component relies on is a requirement; a threshold that only steers the implementation belongs in design.md.
+    - Scenarios use inputs the test suite can produce today (tstokenlib's fixture and test chain, localnet, a local ricochet); extending them is a task, not an assumption.
+    - Numbers in requirements and scenarios are either measured (say where) or bounds a task will check; no comparisons with anything unmeasured.
+  design:
+    - For each bound set before measuring, say what happens if the measurement fails it.
+  tasks:
+    - Every task states how it is verified; every non-functional requirement has a verification task, robustness ones by mutation testing.
+    - Every measurement task names the scratch script and the number it records in docs/DESIGN.md.
+
+operations:
+  apply:
+    - Do not commit; report what changed and the test output, and let the user ask for the commit.
+    - When a design decision turns out wrong in the code, update design.md and say so rather than silently diverging.
+  archive:
+    - Before archiving, confirm the design record section for the change exists in docs/DESIGN.md.
