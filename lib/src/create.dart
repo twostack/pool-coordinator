@@ -5,7 +5,6 @@ import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:dartsv/dartsv.dart';
 import 'package:logging/logging.dart';
-import 'package:tstokenlib/src/crypto/note_commitment_tree.dart' show NoteCommitmentTree;
 import 'package:tstokenlib/src/crypto/nullifier_tree.dart' show NullifierTree;
 import 'package:tstokenlib/src/script_gen/pool_verifier_gen.dart' show PoolStatement;
 import 'package:tstokenlib/src/script_gen/slot_script_common.dart' show SlotScript;

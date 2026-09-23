@@ -41,7 +41,7 @@ class CoordinatorSetup {
       ShieldedCoordinator(
         config: CoordinatorConfig(plan: c.f.agg, feeRate: 1),
         tool: c.svc,
-        ledger: ledger ?? ShieldedLedger.open(ShieldedPoolLayout.of(c.f.agg.tree), c.r0, c.w0, c.y0.tx),
+        ledger: ledger ?? ShieldedLedger.open(ShieldedPoolLayout.of(c.f.agg.tree), c.r0, c.w0, c.y0.tx, tokenId: c.tokenId, genesisHeader: c.genesisHeader),
         funding: funding ?? wallet,
         store: store,
         publish: publish ?? (tx) async => chain.broadcast(tx),

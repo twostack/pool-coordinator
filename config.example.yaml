@@ -73,3 +73,18 @@ server:
   mined_poll_ms: 2000
   # How long a funding transaction is waited for before the round fails.
   funding_timeout_seconds: 3600
+
+# The read-only API a public landing page reads: the pool's rounds, its
+# statistics and the live state of the round being built. Off unless
+# enabled; it binds to loopback only and is reached through a proxy on this
+# host (see deploy/). It serves nothing about a single submission.
+# api:
+#   enabled: true
+#   bind: 127.0.0.1
+#   port: 8787
+#   # The pool's history of rounds, rebuilt from the store if deleted.
+#   metrics_file: metrics.sqlite
+#   # Every time served is rounded to this, and the live state changes at
+#   # most this often; at least 10.
+#   publish_interval_seconds: 30
+#   max_subscribers: 200

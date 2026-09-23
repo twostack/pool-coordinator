@@ -1,0 +1,76 @@
+# The colocated proxy of the pool's public page (change pool-dashboard).
+#
+# It terminates TLS, serves the built site, and forwards reads of /api/ to
+# the coordinator's loopback port, which nothing else can reach. It needs
+# Caddy built with the rate-limit module; see deploy/README.md.
+#
+# Everything site-specific comes from the environment, with production
+# defaults:
+#   POOL_DOMAIN      the public name (a placeholder until one is chosen)
+#   POOL_SITE        the built site, web/dist
+#   POOL_API         the coordinator's api.bind:api.port
+#   POOL_HTTP_PORT, POOL_HTTPS_PORT   80 and 443 unless testing locally
+{
+	http_port {$POOL_HTTP_PORT:80}
+	https_port {$POOL_HTTPS_PORT:443}
+	# rate_limit is not a standard directive, so it is placed explicitly:
+	# first, so a refused client costs nothing further
+	order rate_limit before basic_auth
+	# a certificate for localhost comes from Caddy's own CA; never ask to
+	# add that CA to the host's trust store
+	skip_install_trust
+}
+
+{$POOL_DOMAIN:pool.example.org} {
+	header {
+		# API data is text on the page, and the page loads nothing from
+		# anywhere but itself
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	handle /api/* {
+		# per client address, generous for a page (a load is about six
+		# requests and paging left one a page) and tight for a scraper
+		rate_limit {
+			zone api {
+				key {remote_host}
+				events 120
+				window 1m
+			}
+		}
+
+		# only reads reach the coordinator
+		@write not method GET HEAD
+		handle @write {
+			header Allow "GET, HEAD"
+			header Content-Type "application/json"
+			respond `{"v":1,"error":"this API only reads"}` 405
+		}
+
+		# JSON compresses well; the event stream must not be buffered by it
+		@json not path /api/events
+		encode @json zstd gzip
+
+		reverse_proxy {$POOL_API:127.0.0.1:8787} {
+			# events go to the browser as they are written
+			flush_interval -1
+			# the coordinator's cache headers stand: no-store for live
+			# routes, immutable for a page of mined rounds
+		}
+	}
+
+	handle {
+		root * {$POOL_SITE:/srv/pool-dashboard/dist}
+		encode zstd gzip
+		# Vite names each asset by its content, so it never changes
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		@page not path /assets/*
+		header @page Cache-Control "no-cache"
+		file_server
+	}
+}

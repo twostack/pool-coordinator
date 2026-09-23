@@ -100,6 +100,55 @@ round:
     expect(() => PoolConfig.parse('plan: [unclosed'), throwsA(isA<ConfigError>()));
   });
 
+  group('the api section', () {
+    const api = """
+api:
+  enabled: true
+""";
+
+    test('absent or commented out, the API is off, as before the section existed', () {
+      expect(PoolConfig.parse(full).api, isNull);
+      expect(PoolConfig.parse(File('config.example.yaml').readAsStringSync()).api, isNull);
+      expect(PoolConfig.parse('$full${api.replaceFirst('true', 'false')}').api, isNull);
+    });
+
+    test('enabled, it takes loopback defaults and resolves the metrics file against the file\'s directory', () {
+      final a = PoolConfig.parse('$full$api', baseDir: '/etc/pool').api!;
+      expect(a.bind.address, '127.0.0.1');
+      expect(a.port, 8787);
+      expect(a.metricsFile, '/etc/pool/metrics.sqlite');
+      expect(a.publishInterval, const Duration(seconds: 30));
+      expect(a.maxSubscribers, 200);
+      expect(PoolConfig.parse('$full$api  bind: "::1"\n').api!.bind.isLoopback, isTrue);
+    });
+
+    test('a bind that is not loopback is refused naming api.bind', () {
+      for (final b in ['0.0.0.0', '192.168.1.10', '"::"', 'localhost', 'example.com']) {
+        expect(() => PoolConfig.parse('$full$api  bind: $b\n'),
+            throwsA(isA<ConfigError>().having((e) => e.field, 'field', 'api.bind')), reason: b);
+      }
+    });
+
+    test('an interval under 10 s, a bad port, no subscribers or an unknown field is named', () {
+      ConfigError err(String extra) {
+        try {
+          PoolConfig.parse('$full$api$extra');
+        } on ConfigError catch (e) {
+          return e;
+        }
+        fail('parsed with $extra');
+      }
+
+      expect(err('  publish_interval_seconds: 5\n').field, 'api.publish_interval_seconds');
+      expect(err('  port: 70000\n').field, 'api.port');
+      expect(err('  max_subscribers: 0\n').field, 'api.max_subscribers');
+      expect(err('  enabled_: true\n').field, 'api.enabled_');
+      expect(() => PoolConfig.parse('$full${api.replaceFirst('true', 'yes please')}'),
+          throwsA(isA<ConfigError>().having((e) => e.field, 'field', 'api.enabled')));
+      expect(PoolConfig.parse('$full$api  publish_interval_seconds: 10\n').api!.publishInterval, const Duration(seconds: 10));
+    });
+  });
+
   test('a configuration without genesis parses, for create', () {
     final c = PoolConfig.parse(_remove(full, 'genesis'));
     expect(c.genesis, isNull);

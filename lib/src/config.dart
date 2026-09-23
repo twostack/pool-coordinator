@@ -107,6 +107,30 @@ class ServerConfig {
   });
 }
 
+/// The read-only API a public page reads the pool's history and live state
+/// from. It binds to loopback only: the public reach it through a proxy on
+/// the same host, which is where TLS, rate limits and the content policy
+/// belong, so nothing in this process ever answers the internet directly.
+class ApiConfig {
+  /// The least publication interval: every time the API serves is rounded
+  /// to the interval, and a shorter one would start to time individual
+  /// submissions.
+  static const minPublishInterval = Duration(seconds: 10);
+
+  final InternetAddress bind;
+  final int port;
+  final String metricsFile;
+  final Duration publishInterval;
+  final int maxSubscribers;
+  const ApiConfig({
+    required this.bind,
+    required this.port,
+    required this.metricsFile,
+    required this.publishInterval,
+    required this.maxSubscribers,
+  });
+}
+
 /// The server's configuration: one YAML file, with the secrets elsewhere.
 ///
 /// Every field the server needs is required and named when missing, and
@@ -125,6 +149,10 @@ class PoolConfig {
   final RoundConfig round;
   final ServerConfig server;
 
+  /// The read-only API, or null when the configuration has no enabled
+  /// `api:` section; a configuration from before the API runs as it did.
+  final ApiConfig? api;
+
   const PoolConfig({
     required this.plan,
     required this.network,
@@ -135,6 +163,7 @@ class PoolConfig {
     required this.genesis,
     required this.round,
     required this.server,
+    this.api,
   });
 
   static const planNames = ['test', 'production'];
@@ -232,6 +261,31 @@ class PoolConfig {
     } else {
       server = ServerConfig(statusFile: path('status.json'));
     }
+    ApiConfig? api;
+    if (root.has('api')) {
+      final a = root.section('api');
+      final enabled = a.boolean('enabled', false);
+      final bindText = a.string('bind', '127.0.0.1');
+      final bind = InternetAddress.tryParse(bindText);
+      if (bind == null || !bind.isLoopback) {
+        throw ConfigError('api.bind', '"$bindText" is not a loopback address; the API is reached through a proxy on this host');
+      }
+      // 0 lets the system pick a free port, which the tests use
+      final port = a.integer('port', 8787);
+      if (port < 0 || port > 65535) throw ConfigError('api.port', '$port is not a port');
+      final metricsFile = path(a.string('metrics_file', 'metrics.sqlite'));
+      final interval = Duration(seconds: a.integer('publish_interval_seconds', 30));
+      if (interval < ApiConfig.minPublishInterval) {
+        throw ConfigError('api.publish_interval_seconds',
+            'is ${interval.inSeconds}; the least is ${ApiConfig.minPublishInterval.inSeconds}, so no time served times one submission');
+      }
+      final maxSubscribers = a.integer('max_subscribers', 200);
+      if (maxSubscribers < 1) throw ConfigError('api.max_subscribers', 'must be at least 1');
+      a.done();
+      if (enabled) {
+        api = ApiConfig(bind: bind, port: port, metricsFile: metricsFile, publishInterval: interval, maxSubscribers: maxSubscribers);
+      }
+    }
     root.done();
 
     return PoolConfig(
@@ -243,7 +297,8 @@ class PoolConfig {
         store: store,
         genesis: genesis,
         round: round,
-        server: server);
+        server: server,
+        api: api);
   }
 }
 
@@ -312,6 +367,13 @@ class _Section {
   }
 
   String? optionalString(String key) => has(key) ? string(key) : null;
+
+  bool boolean(String key, bool fallback) {
+    final v = _take(key);
+    if (v == null) return fallback;
+    if (v is! bool) throw ConfigError(_path(key), 'is not true or false');
+    return v;
+  }
 
   int integer(String key, [int? fallback]) {
     final v = _take(key);

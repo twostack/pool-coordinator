@@ -27,8 +27,25 @@ import 'support/test_keys.dart';
 /// be started:
 ///
 ///   POOL_LOCALNET=1 dart test test/localnet_e2e_test.dart
+///
+/// `tool/dashboard_e2e.sh` also drives the public page through this run.
+/// It sets POOL_DASHBOARD_E2E to a folder of signal files: the run then
+/// serves the API on POOL_API_PORT with a 10 s publication interval,
+/// writes `ready` once the API is up, waits for the browser's `go` before
+/// round 1 so the page sees the round arrive live, and waits for `done`
+/// before it floods and restarts the server.
 void main() async {
   final env = Platform.environment;
+  final signals = env['POOL_DASHBOARD_E2E'];
+  Future<void> signal(String name) => File('$signals/$name').writeAsString('');
+  Future<void> awaitSignal(String name) async {
+    final deadline = DateTime.now().add(const Duration(minutes: 5));
+    while (!File('$signals/$name').existsSync()) {
+      if (DateTime.now().isAfter(deadline)) fail('the page never signalled $name');
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+  }
+
   final ricochetSkip = await RicochetTestServer.available();
   final skip = env['POOL_LOCALNET'] == null ? 'needs ../localnet up; set POOL_LOCALNET=1' : ricochetSkip;
 
@@ -84,6 +101,10 @@ server:
   status_file: status.json
   mined_poll_ms: 200
   funding_timeout_seconds: 600
+api:
+  enabled: true
+  port: ${signals == null ? 0 : env['POOL_API_PORT'] ?? 8787}
+${signals == null ? '' : '  publish_interval_seconds: 10'}
 ''');
     });
 
@@ -173,6 +194,10 @@ server:
       final walletT = await RicochetTransport.connect(seed: Uint8List.fromList(List.generate(32, (_) => rng.nextInt(256))), server: ricochet.address);
       final coordinator = created.peerId;
       final coordinatorId = PeerIdOf(coordinator).id;
+      if (signals != null) {
+        await signal('ready');
+        await awaitSignal('go');
+      }
 
       try {
         // the depositor pays into a covenant naming PP3_0
@@ -295,7 +320,8 @@ server:
         expect(from3.map((e) => e.sequence), [3]);
 
         // ---- a reader opened from the descriptor, with the chain, reaches the status's header
-        final reader = ShieldedChainReader.open(descriptor.layout, created.issuance, created.witness0, created.slot0);
+        final reader = ShieldedChainReader.open(descriptor.layout, created.issuance, created.witness0, created.slot0,
+            tokenId: descriptor.tokenId, genesisHeader: descriptor.genesisHeader);
         for (final a in [a1, a2]) {
           final triple = (round: (await node.fetch(a.roundId))!, witness: (await node.fetch(a.witnessId))!, nextSlot: (await node.fetch(a.slotId))!);
           final applied = reader.read([triple]);
@@ -305,6 +331,42 @@ server:
         expect(reader.ledger.tipRound.id, status2['tip']['roundTx']);
         expect(reader.ledger.header.encode(), server.co.ledger.header.encode());
         expect(reader.ledger.snapshot(), server.co.ledger.snapshot());
+
+        // ---- the API, as an operator's curl sees it: both rounds mined on localnet
+        final port = server.api!.port;
+        Future<Map<String, dynamic>> curl(String path) async {
+          final r = await Process.run('curl', ['-sS', '-f', 'http://127.0.0.1:$port$path']);
+          expect(r.exitCode, 0, reason: '$path: ${r.stderr}');
+          final body = jsonDecode(r.stdout as String) as Map<String, dynamic>;
+          expect(body['v'], 1, reason: path);
+          return body;
+        }
+
+        final apiDeadline = DateTime.now().add(const Duration(minutes: 1));
+        List<dynamic> rounds;
+        while (true) {
+          rounds = (await curl('/api/rounds'))['rounds'] as List;
+          if (rounds.length == 2 && rounds.every((r) => r['minedHeight'] != null)) break;
+          if (DateTime.now().isAfter(apiDeadline)) fail('the API did not show both rounds mined: $rounds');
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+        expect([for (final r in rounds) r['witness']], [a2.witnessId, a1.witnessId]);
+        for (final r in rounds) {
+          expect(r['minedHeight'], await node.minedHeight(r['witness'] as String));
+        }
+        final pool = await curl('/api/pool');
+        expect(pool['tip'], 2);
+        // Regtest has no public explorer, so the page shows txids unlinked.
+        expect(pool.containsKey('explorer'), isTrue);
+        expect(pool['explorer'], isNull);
+        expect(pool['genesis']['issuance'], created.issuance.id);
+        expect((await curl('/api/stats'))['roundsMined'], 2);
+        expect((await curl('/api/series?metric=rounds&bucket=day'))['points'], isNotEmpty);
+        final events = await Process.run('curl', ['-sS', '-m', '2', 'http://127.0.0.1:$port/api/events']);
+        expect(events.stdout as String, startsWith('event: live\ndata: {"v":1'));
+        final post = await Process.run('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST', 'http://127.0.0.1:$port/api/pool']);
+        expect(post.stdout, '405');
+        if (signals != null) await awaitSignal('done');
 
         // ---- the folder is not left to fill: 1,100 messages faster than they are answered
         final before = server.status;

@@ -88,14 +88,17 @@ void main() async {
           arities: const [2, 2],
           nullifierLevel: 1,
           receiptSlots: 2,
-          spendP: testSpendParams);
+          spendP: testSpendParams,
+          leavesPerRound: testPlan().tree.leavesAppended,
+          tokenId: List.filled(32, 4),
+          genesisHeader: List.filled(PoolHeader.byteSize, 5));
       expect(await coordinator.feedExists(), isFalse);
       await coordinator.createFeed();
       expect(await coordinator.feedExists(), isTrue);
       expect(await coordinator.announce(descriptor.encode()), 1);
       final header = PoolHeader.decode(List.filled(PoolHeader.byteSize, 0));
       PoolAnnouncement a(int n) => PoolAnnouncement(
-          round: n, header: header, roundTxId: List.filled(32, 10 + n), witnessTxId: List.filled(32, 20 + n), slotTxId: List.filled(32, 30 + n));
+          round: n, header: header, roundTxId: List.filled(32, 10 + n), witnessTxId: List.filled(32, 20 + n), slotTxId: List.filled(32, 30 + n), blockRoot: List.filled(32, 40 + n));
       expect(await coordinator.announce(a(1).encode()), 2);
       expect(await coordinator.announce(a(2).encode()), 3);
 

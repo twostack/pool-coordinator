@@ -1,4 +1,3 @@
-import 'package:tstokenlib/src/script_gen/pool_spend_air.dart' show PoolSpendAir;
 import 'package:tstokenlib/tstokenlib.dart';
 
 /// The two aggregation plans a configuration can name. The plan is the one

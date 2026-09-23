@@ -216,3 +216,95 @@ localnet ARC's error shapes; ARC's documented acceptance). Unmeasured on
 testnet: the block wait per funding output (about ten minutes each, three
 a round, since funding waits for a block), WhatsOnChain's rate limits at
 the server's call volume, and TAAL's actual scriptSig limit.
+
+## 2026-09-24: the pool's public view (change `pool-dashboard`)
+
+A landing page shows the pool's rounds as they are mined, the round being
+worked on, and the pool's figures. The coordinator keeps the history and
+serves it read-only; a static site behind a colocated proxy reads it. This
+section covers the coordinator's half; the site and the proxy follow.
+
+Before any of it, the server was brought up to tstokenlib's block roots
+(`sp-block-roots`): announcements now carry the round's block root, which
+the server takes from the library's own announcement of the round, and
+ledgers and readers name the pool's token id and genesis header. The
+tests build their chain from the library's exported test chain
+(`package:tstokenlib/testing.dart`) instead of a copy of it.
+
+### The history
+
+`MetricsRecorder` (`lib/src/metrics/`) is the one place the public view is
+written, and so the privacy boundary. Per round it keeps the three txids,
+the number of real transfers, the capacity, the header's balance, the
+wallet's cost, the build and proving times, when it was published and the
+height it was mined at, in one SQLite file beside the store. It keeps
+nothing per submission: no ids, senders, arrival times, pending count or
+submission counts, and nothing of the wallet but a round's cost. The real
+transfer count is read from the witness the way any chain reader can
+(padding carries an empty ciphertext bundle), so the page shows nothing
+the chain does not.
+
+The round's stage comes from the library's `RoundTiming` as it laps,
+mapped to proving, funding and broadcast; a pin test fails if the library
+renames or reorders a lap. A round is recorded from the library's
+announcement and its witness after the announcement is appended, watched
+until its witness is mined (one round at a time, oldest first), and a
+history that is missing or unreadable is moved aside and rebuilt from the
+store and the feed after ready. A rebuilt row has no times, durations or
+cost, since the store keeps none. Every recorder call is guarded: with the
+history locked by another connection, round 2 of the test chain published
+and announced as without it, and a submission sent afterwards was answered
+within 2 s.
+
+### The API
+
+The API (`lib/src/api/`) answers GET and HEAD on five routes from the
+history and the live state only, never the chain, the store or the ledger.
+Every time it serves is rounded to the publication interval (30 s by
+default), and the live state and mined-round events pass a gate that ticks
+on that interval, so no time it serves is finer than 30 s and none derives
+from one submission's arrival more finely than the chain's own timing does.
+
+It runs in an isolate of its own. The library proves on the server's
+isolate, which the load test measured holding it 3.7 to 5.1 s a round at
+test parameters; with the API on that isolate, 115 of 828 requests at 50 a
+second were reset during a round. From its own isolate, reading the
+history over its own connection, 886 requests at 50 a second through two
+rounds all answered while the server's isolate stalled 4 s, and every
+submission was answered within 2 s. A 10,000-request mutation fuzz found
+two answers that were not the API's JSON: `shelf` answered a target that
+is not a path with its own 500 (now the API's 400), and `dart:io` answers
+a request line it cannot parse with a plain 400 before any route sees it,
+which the spec now allows.
+
+### Measured
+
+`tool/scratch/metrics_probe.dart`, on the M3 Pro:
+
+- `record`: recording a round on the publish path, into a history of
+  1,000 to 2,000 rounds, with a witness inflated to the largest production
+  witness measured (2,529,395 B): 0.51 ms median, 3.39 ms at the 95th
+  percentile against the 5 ms bound, nearly all of it the witness's bundle
+  count. Taking the txids from the transactions instead of the
+  announcement measured 264 ms median and 614 ms at the 95th percentile,
+  since a transaction's id hashes its serialization; the recorder takes
+  them from the announcement. The history is 268 B a round.
+- `api`: 1,000 requests each over a 1,000-round history, through the API's
+  isolate: `/api/rounds` 0.26 ms median and 0.34 ms at the 95th
+  percentile, `/api/stats` 0.28 ms and 0.37 ms, against the 50 ms bound; a
+  full 100-round page 0.59 ms and a day series 0.42 ms at the 95th.
+- `start`: start to ready on the test chain's two-round store, five runs
+  each: API off 1,184 ms median, API on with its history 1,221 ms, API on
+  with its history deleted 1,215 ms, the two rounds rebuilt about 630 ms
+  after ready. The API adds about 40 ms to start, and the rebuild does not
+  delay ready. Production's start to ready on a 1,000-round store measured
+  44.4 s above, against the 60 s bound.
+- The rebuild of 1,000 stored rounds with production-size witnesses:
+  937 s, 0.94 s a round, nearly all of it the store's parse and txid check
+  of each 2.5 MB witness. Run on the server's isolate it held that isolate
+  1.15 s a round, which would hold intake as long; each round's read now
+  runs in a short-lived worker isolate, and the server's isolate went at
+  most 60 ms without running through the whole rebuild.
+- The site's first load, every file `vite build` writes to `web/dist/`
+  gzipped: 38.4 KB (36.7 KB of it the script, Lit and uPlot included)
+  against the 150 KB budget, which `npm run build` enforces.

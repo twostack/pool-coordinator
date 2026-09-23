@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
@@ -8,7 +9,12 @@ import 'package:tstokenlib/src/crypto/stark_kernels.dart' show StarkKernels;
 import 'package:tstokenlib/tstokenlib.dart';
 
 import 'chain_access.dart';
+import 'api/api_host.dart';
+import 'api/pool_api.dart';
 import 'config.dart';
+import 'metrics/history_rebuild.dart';
+import 'metrics/metrics_history.dart';
+import 'metrics/metrics_recorder.dart';
 import 'plans.dart';
 import 'round_store.dart';
 import 'status.dart';
@@ -65,6 +71,26 @@ class PoolServer {
   /// Announcements that could not be appended, retried on a timer.
   final _unannounced = <PoolAnnouncement>[];
   Timer? _announceRetry;
+
+  /// The public view of the pool, when the configuration enables the API;
+  /// null otherwise, or when its history could not be opened.
+  MetricsRecorder? metrics;
+
+  /// The read-only API over [metrics], in its own isolate so that proving
+  /// a round does not stop it answering.
+  ApiHost? api;
+
+  /// Whether the round [_watched] is still being built, and the timing of
+  /// the last build that ended: until the next build starts its own, the
+  /// library's timing is that one, and reading it would show a finished
+  /// round as the one in progress.
+  bool _buildInFlight = false;
+  RoundTiming? _endedTiming;
+
+  /// Published rounds whose witness is not yet seen mined, by number, and
+  /// whether the one loop that watches them is running.
+  final _minedQueue = SplayTreeMap<int, String>();
+  bool _watchingMined = false;
 
   PoolServer._({
     required this.config,
@@ -170,10 +196,13 @@ class PoolServer {
     await _checkFeed();
     lap('feed');
     status.ready = true;
+    _openMetrics();
+    await _startApi();
     await _refresh();
     _poll = Timer.periodic(config.server.pollInterval, (_) => _tick());
     log.info('ready (${laps.join(', ')}): tip round ${co.ledger.round}, ${wallet.report}, peer id ${transport.peerId}');
     unawaited(co.runIdleWork());
+    if (metrics != null) unawaited(_rebuildHistory());
   }
 
   Future<Transaction> _fetchGenesis(String txid, String what) async {
@@ -256,7 +285,7 @@ class PoolServer {
         // only the tip can be missing: every earlier round was announced
         // before the next was built
         final r = (await store.read(co.ledger.round))!;
-        final a = PoolAnnouncement.of(co.ledger.round, co.ledger.header, r.round, r.witness, r.y);
+        final a = PoolAnnouncement.of(co.ledger.round, co.ledger.header, r.round, r.witness, r.y, blockRoot: co.ledger.blockRoot);
         log.warning('round ${a.round} was published but not announced; announcing it now');
         await _announce(a);
       }
@@ -273,10 +302,14 @@ class PoolServer {
     final b = co.building;
     if (b != null && b != _watched) {
       _watched = b;
+      _buildInFlight = true;
       b.whenComplete(() {
+        _buildInFlight = false;
+        _endedTiming = co.lastTiming;
         if (!_stopping) unawaited(_refresh());
       });
     }
+    _observe();
     unawaited(_drain());
   }
 
@@ -424,11 +457,17 @@ class PoolServer {
       rethrow;
     }
     if (what == 'witness') {
-      final a = PoolAnnouncement.of(n, co.ledger.header, r.round, r.witness, r.y);
+      // the library's own announcement of the round, which carries its
+      // block root
+      final a = co.announcements.lastWhere((a) => a.round == n);
       await _announce(a);
+      metrics?.roundPublished(a, r.witness, co.lastTiming);
+      _watchMined(n, a.witnessId);
       _submitters.clear();
       try {
         await wallet.reconcile(roundTxs: [r.y, r.round, r.witness]);
+        final cost = wallet.lastRoundCost;
+        if (cost != null) metrics?.costKnown(n, cost);
       } catch (e) {
         log.warning('reconcile after round $n: $e');
       }
@@ -484,6 +523,7 @@ class PoolServer {
   // ---------------------------------------------------------------- status
 
   Future<void> _refresh() async {
+    _observe();
     final s = co.status;
     status.fromCoordinator(s);
     status.tipY = co.ledger.tipSlot.id;
@@ -501,6 +541,124 @@ class PoolServer {
     }
   }
 
+  // --------------------------------------------------------------- metrics
+
+  void _openMetrics() {
+    final api = config.api;
+    if (api == null) return;
+    try {
+      final history = MetricsHistory.open(api.metricsFile);
+      if (history.movedAside != null) {
+        log.warning('the pool history at ${api.metricsFile} was not one this server reads; moved it to ${history.movedAside} and started afresh');
+      }
+      final m = metrics = MetricsRecorder(history, capacity: co.capacity, clock: clock);
+      for (final (n, witness) in m.unminedWitnesses()) {
+        _watchMined(n, witness);
+      }
+    } catch (e) {
+      // the pool runs without its public view rather than not at all
+      log.warning('the pool history could not be opened, so the API is off: $e');
+      metrics = null;
+    }
+  }
+
+  Future<void> _startApi() async {
+    final m = metrics, cfg = config.api, genesis = config.genesis;
+    if (m == null || cfg == null || genesis == null) return;
+    try {
+      api = await ApiHost.start(
+        config: cfg,
+        recorder: m,
+        facts: PoolFacts(
+          network: config.network,
+          plan: config.plan,
+          capacity: co.capacity,
+          issuance: genesis.issuance,
+          witness0: genesis.witness0,
+          slot0: genesis.slot0,
+          roundDeadline: config.round.deadline,
+          explorer: switch ((config.network, config.chain.kind)) {
+            (NetworkType.MAIN, _) => 'main',
+            (_, ChainKind.testnet) => 'test',
+            // A test-network node is the regtest localnet: no explorer.
+            _ => null,
+          },
+        ),
+      );
+      log.info('the API is at http://${cfg.bind.address}:${api!.port}/api/');
+    } catch (e) {
+      log.warning('the API could not start on ${cfg.bind.address}:${cfg.port}, so it is off; the pool runs on: $e');
+    }
+  }
+
+  /// Hands the recorder what the library says the pool is doing: whether
+  /// transfers are pending, and the laps of the round being built.
+  void _observe() {
+    final m = metrics;
+    if (m == null) return;
+    final s = co.status;
+    final t = co.lastTiming;
+    final Iterable<String>? laps = !_buildInFlight
+        ? null
+        : t == null || identical(t, _endedTiming)
+            ? const []
+            : t.stages.keys;
+    m.observe(assembling: s.pending > 0, deadline: s.deadline, tipRound: co.ledger.round, laps: laps);
+  }
+
+  void _watchMined(int number, String witness) {
+    if (metrics == null) return;
+    _minedQueue[number] = witness;
+    if (!_watchingMined) unawaited(_watchMinedLoop());
+  }
+
+  /// One round at a time, oldest first: a witness cannot be mined before
+  /// the rounds it builds on, and a backlog after an outage should not
+  /// burst the chain service's rate limit. A round not mined within the
+  /// funding timeout is left for the next start.
+  Future<void> _watchMinedLoop() async {
+    _watchingMined = true;
+    try {
+      while (_minedQueue.isNotEmpty && !_stopping) {
+        final n = _minedQueue.firstKey()!;
+        final txid = _minedQueue[n]!;
+        final giveUp = DateTime.now().add(config.server.fundingTimeout);
+        int? height;
+        while (!_stopping) {
+          try {
+            height = await chain.minedHeight(txid);
+          } catch (e) {
+            log.fine('asking whether round $n\'s witness is mined: $e');
+          }
+          if (height != null || DateTime.now().isAfter(giveUp)) break;
+          await Future<void>.delayed(config.server.minedPoll);
+        }
+        if (_stopping) break;
+        _minedQueue.remove(n);
+        if (height != null) {
+          metrics?.mined(n, height);
+        } else {
+          log.warning('round $n\'s witness $txid was not mined within ${config.server.fundingTimeout}; the next start asks again');
+        }
+      }
+    } finally {
+      _watchingMined = false;
+    }
+  }
+
+  /// Fills the history with the stored rounds it lacks, after ready; see
+  /// [rebuildHistory].
+  Future<void> _rebuildHistory() => rebuildHistory(
+        recorder: metrics!,
+        store: store,
+        transport: transport,
+        building: () => _buildInFlight,
+        stopping: () => _stopping,
+        pause: config.server.pollInterval,
+        rebuilt: _watchMined,
+        log: log,
+      );
+
   /// Whether a round is being published right now.
   bool get publishing => _publishing != null;
 
@@ -511,6 +669,8 @@ class PoolServer {
   Future<void> stop() async {
     if (_stopping) return;
     _stopping = true;
+    // the public view goes first: nothing it serves matters to the stop
+    await api?.close();
     _poll?.cancel();
     _announceRetry?.cancel();
     log.info('stopping: no further submissions');
@@ -521,6 +681,7 @@ class PoolServer {
     }
     status.ready = false;
     await _refresh();
+    await metrics?.close();
     await transport.close();
     log.info('stopped at round ${co.ledger.round}');
   }
