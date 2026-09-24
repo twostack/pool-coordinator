@@ -75,6 +75,16 @@ void main() {
         'error': null,
         'id': 'x'
       }),
+      NodeCall.block: jsonEncode({
+        'result': {'txid': txid, 'confirmations': 3, 'blockheight': 15040, 'blockhash': 'ab' * 32, 'hex': txHex},
+        'error': null,
+        'id': 'x'
+      }),
+      NodeCall.proof: jsonEncode({
+        'result': {'index': 2, 'txOrId': txid, 'target': 'ab' * 32, 'nodes': ['cd' * 32, '*', 'ef' * 32]},
+        'error': null,
+        'id': 'x'
+      }),
       NodeCall.txout: jsonEncode({
         'result': {'bestblock': '00' * 32, 'confirmations': 1, 'value': 50.0},
         'error': null,
@@ -102,11 +112,27 @@ void main() {
     }
   });
 
+  test('a TSC proof\'s "*" is the working hash, and the branch reaches the block\'s root', () {
+    // three transactions: the last pairs with itself at the bottom level
+    final txs = [for (final b in ['11', '22', '33']) b * 32];
+    final root = TxPlace.rootOf(txs[0], 0, TxPlace.branchFor(txs, 0));
+    for (int i = 0; i < 3; i++) {
+      expect(TxPlace.rootOf(txs[i], i, TxPlace.branchFor(txs, i)), root, reason: 'transaction $i');
+    }
+    final pair01 = TxPlace.rootOf(txs[0], 0, [txs[1]]);
+    final place = TxPlace.fromTsc('the node', txs[2], {'index': 2, 'txOrId': txs[2], 'target': 'ab' * 32, 'nodes': ['*', pair01]});
+    expect(place.branch, TxPlace.branchFor(txs, 2));
+    expect(TxPlace.rootOf(txs[2], 2, place.branch), root);
+    expect(() => TxPlace.fromTsc('the node', txs[2], {'index': 2, 'txOrId': txs[1], 'target': 'ab' * 32, 'nodes': []}),
+        throwsA(isA<ChainError>()), reason: 'a proof of another transaction');
+  });
+
   group('testnet', () {
     final valid = {
       TestnetCall.fetch: txHex,
       TestnetCall.chainInfo: '{"chain":"test","blocks":1759424,"headers":1759424,"bestblockhash":"00000000be85","difficulty":1}',
       TestnetCall.txStatus: '{"txid":"$txid","confirmations":1759424,"blockheight":1,"blockhash":"00000000b873"}',
+      TestnetCall.proof: '[{"index":2,"txOrId":"$txid","target":"${'ab' * 32}","nodes":["${'cd' * 32}","*","${'ef' * 32}"]}]',
       TestnetCall.spent: '{"txid":"5f2052ac5cb8eed1995a087b8f4777b27345acf97a193ef8af536ed5dd4935ce","vin":0,"status":"confirmed"}',
       TestnetCall.unspentAll:
           '{"address":"n3GNqMveyvaPvUbH469vDRadqpJMPc84JA","script":"a7ec","result":[{"height":280589,"tx_pos":0,"tx_hash":"$txid","value":50000,"isSpentInMempoolTx":false,"status":"confirmed"}]}',

@@ -117,6 +117,18 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
 
     Secrets secrets(PoolConfig config) => Secrets.load(config, env: {'POOL_WALLET_PASSPHRASE': passphrase, 'POOL_RPC_PASSWORD': env['POOL_RPC_PASSWORD'] ?? 'bitcoin'});
 
+    /// The status file once it shows round [n]: the server writes it after
+    /// reconciling the round, which can finish after the round's
+    /// transactions are mined.
+    Future<Map<String, dynamic>> statusAt(String path, int n) async {
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (true) {
+        final status = jsonDecode(File(path).readAsStringSync()) as Map<String, dynamic>;
+        if (status['tip']['round'] == n || DateTime.now().isAfter(deadline)) return status;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+
     Future<void> untilMined(String txid) async {
       final deadline = DateTime.now().add(const Duration(minutes: 2));
       while (await node.minedHeight(txid) == null) {
@@ -222,6 +234,43 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
         await untilMined(covenant.id);
         final depositOutpoint = c.svc.getOutpoint(covenant.hash, outputIndex: ShieldedPoolTool.depositVout);
 
+        // what the wallet's replies folder holds besides submission replies,
+        // and the notices it is sent in a folder of their own
+        final notices = <PoolRoundMined>[];
+        final catchUps = <PoolCatchUpReply>[];
+        List<PoolReply> sortReplies(List<InboxMessage> ms) {
+          final out = <PoolReply>[];
+          for (final m in ms) {
+            final msg = PoolMessage.decode(m.payload);
+            if (msg is PoolReply) out.add(msg);
+            if (msg is PoolRoundMined) fail('a notice arrived in the replies folder, where a wallet takes it for an answer');
+            if (msg is PoolCatchUpReply) catchUps.add(msg);
+          }
+          return out;
+        }
+
+        /// Asks the coordinator for [q] over ricochet, as a wallet does.
+        Future<PoolCatchUpReply> catchUp(PoolCatchUpRequest q) async {
+          await walletT.submit(coordinator, q.encode());
+          final deadline = DateTime.now().add(const Duration(minutes: 1));
+          while (true) {
+            sortReplies(await walletT.readReplies());
+            final i = catchUps.indexWhere((r) => hex.encode(r.id) == hex.encode(q.id));
+            if (i >= 0) return catchUps.removeAt(i);
+            if (DateTime.now().isAfter(deadline)) fail('no answer to catch-up ${q.what.name}');
+            await Future<void>.delayed(const Duration(milliseconds: 200));
+          }
+        }
+
+        /// The merkle root the node's block [hash] states, display order.
+        Future<String> merkleRootOf(List<int> hash) async {
+          final r = await Process.run('curl', [
+            '-sS', '-u', 'bitcoin:${env['POOL_RPC_PASSWORD'] ?? 'bitcoin'}', '--data-binary',
+            jsonEncode({'method': 'getblock', 'params': [hex.encode(hash), 1]}), env['LOCALNET_RPC'] ?? 'http://localhost:18332'
+          ]);
+          return (jsonDecode(r.stdout as String) as Map<String, dynamic>)['result']['merkleroot'] as String;
+        }
+
         /// Submits [t] and waits for its reply, timing the round trip.
         Future<PoolReply> submit(ShieldedTransfer t, {Transaction? depositTx}) async {
           final sub = PoolSubmission.of(t, c.f.agg.spendP, depositTx: depositTx, rng: rng);
@@ -230,8 +279,7 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
           await walletT.submit(coordinator, bytes);
           final deadline = DateTime.now().add(const Duration(minutes: 3));
           while (true) {
-            for (final m in await walletT.readReplies()) {
-              final r = PoolReply.decode(m.payload);
+            for (final r in sortReplies(await walletT.readReplies())) {
               if (hex.encode(r.id) == hex.encode(sub.id)) {
                 final took = sw.elapsed;
                 timings['submission ${hex.encode(sub.id).substring(0, 8)}'] = took;
@@ -284,7 +332,7 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
         for (final id in [a1.slotId, a1.roundId, a1.witnessId]) {
           await untilMined(id);
         }
-        final status1 = jsonDecode(File(config.server.statusFile).readAsStringSync());
+        final status1 = await statusAt(config.server.statusFile, 1);
         expect(status1['tip']['round'], 1);
         expect(status1['tip']['witness'], a1.witnessId);
         print('  after round 1: ${status1['wallet']}');
@@ -300,7 +348,7 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
         for (final id in [a2.slotId, a2.roundId, a2.witnessId]) {
           await untilMined(id);
         }
-        final status2 = jsonDecode(File(config.server.statusFile).readAsStringSync());
+        final status2 = await statusAt(config.server.statusFile, 2);
         expect(status2['tip']['round'], 2);
         expect(status2['tip']['roundTx'], a2.roundId);
         expect(status2['wallet']['lastRoundCost'], isNotNull);
@@ -366,6 +414,33 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
         expect(events.stdout as String, startsWith('event: live\ndata: {"v":1'));
         final post = await Process.run('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', '-X', 'POST', 'http://127.0.0.1:$port/api/pool']);
         expect(post.stdout, '405');
+
+        // ---- catch-up and notices over ricochet, checked against the node's own blocks
+        final noticeDeadline = DateTime.now().add(const Duration(minutes: 1));
+        while (notices.map((n) => n.round).toSet().length < 2) {
+          if (DateTime.now().isAfter(noticeDeadline)) fail('the submitter was not sent both rounds: ${notices.map((n) => n.round)}');
+          for (final m in await walletT.readNotices()) {
+            notices.add(PoolMessage.decode(m.payload) as PoolRoundMined);
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+        }
+        for (final n in notices) {
+          final a = n.round == 1 ? a1 : a2;
+          expect(hex.encode(n.witnessTxId), a.witnessId);
+          expect(hex.encode(n.roundTxId), a.roundId);
+          expect(hex.encode(n.computedMerkleRoot()), await merkleRootOf(n.blockHash), reason: 'round ${n.round}\'s notice is in its block');
+        }
+        final head = await catchUp(PoolCatchUpRequest.head());
+        expect(head.round, 2);
+        expect(hex.encode(head.computedMerkleRoot()), await merkleRootOf(head.blockHash!));
+        final round1 = await catchUp(PoolCatchUpRequest.round(1));
+        expect(ShieldedLedger.parse(round1.witnessTx!).id, a1.witnessId);
+        expect(hex.encode(round1.computedMerkleRoot()), await merkleRootOf(round1.blockHash!));
+        final frontier = await catchUp(PoolCatchUpRequest.frontier());
+        expect(frontier.round, 2);
+        expect(frontier.blockRoot, a2.blockRoot);
+        expect((await catchUp(PoolCatchUpRequest.round(9))).refusal, CatchUpRefusal.notYet);
+
         if (signals != null) await awaitSignal('done');
 
         // ---- the folder is not left to fill: 1,100 messages faster than they are answered

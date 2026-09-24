@@ -734,6 +734,182 @@ void main() {
       expect(await rebuild(), await rebuild());
     }, timeout: const Timeout(Duration(minutes: 2)));
   });
+
+  group('catch-up and notices', () {
+    /// The next message [peer] is sent after its first [seen], decoded.
+    Future<PoolMessage> nextFor(_Run r, String peer, int seen) async {
+      await until(() async => (r.transport.replies[peer]?.length ?? 0) > seen, timeout: const Duration(seconds: 30), what: 'an answer to $peer');
+      return PoolMessage.decode(r.transport.replies[peer]![seen]);
+    }
+
+    Future<PoolCatchUpReply> ask(_Run r, String peer, PoolCatchUpRequest q) async {
+      final seen = r.transport.replies[peer]?.length ?? 0;
+      r.transport.send(peer, q.encode());
+      final reply = await nextFor(r, peer, seen) as PoolCatchUpReply;
+      expect(reply.id, q.id, reason: 'a reply echoes its request\'s id');
+      return reply;
+    }
+
+    Future<void> minedTo(_Run r, int n) =>
+        until(() async => r.server.status.minedTip >= n, timeout: const Duration(seconds: 30), what: 'round $n mined');
+
+    test('Catch-up answers at the last mined round, and is refused before round 1', () async {
+      final r = await _Run.fresh(c, rng, api: false);
+      try {
+        for (final q in [PoolCatchUpRequest.head(), PoolCatchUpRequest.frontier(), PoolCatchUpRequest.blockRoots(from: 1, count: 1024)]) {
+          final a = await ask(r, 'wallet', q);
+          expect(a.refusal, CatchUpRefusal.notYet, reason: q.what.name);
+        }
+        await r._round(1, r.round1Bytes());
+        await minedTo(r, 1);
+        final a1 = PoolMessage.decode(r.transport.entries[1]) as PoolAnnouncement;
+
+        final head = await ask(r, 'wallet', PoolCatchUpRequest.head());
+        expect(head.round, 1);
+        final stored = (await r.store.read(1))!;
+        expect(head.witnessTx, hex.decode(stored.witness.serialize()));
+        expect(head.roundTx, hex.decode(stored.round.serialize()));
+        // the branch reaches the merkle root of the block the witness is in
+        final height = r.chain.minedAt[stored.witness.id]!;
+        expect(hex.encode(head.computedMerkleRoot()), r.chain.merkleRootAt(height));
+        expect(hex.encode(head.blockHash!), FakeChain.blockHashAt(height));
+
+        final frontier = await ask(r, 'wallet', PoolCatchUpRequest.frontier());
+        expect(frontier.round, 1);
+        expect(frontier.blockRoot, a1.blockRoot);
+        final roots = await ask(r, 'wallet', PoolCatchUpRequest.blockRoots(from: 1, count: 1024));
+        expect(roots.roots, [a1.blockRoot]);
+        final off = await ask(r, 'wallet', PoolCatchUpRequest.blockRoots(from: 2, count: 1024));
+        expect(off.refusal, CatchUpRefusal.unpublishedRange);
+        expect(r.server.status.catchUpAnswered, 3);
+        expect(r.server.status.catchUpRefused, 4);
+      } finally {
+        await r.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 3)));
+
+    test('A round published and not yet mined is not answered from, nor noticed', () async {
+      final r = await _Run.fresh(c, rng, api: false, before: (chain) => chain.mineOnBroadcast = false);
+      try {
+        await r._round(1, r.round1Bytes());
+        expect(r.server.co.ledger.round, 1, reason: 'published');
+        expect((await ask(r, 'wallet', PoolCatchUpRequest.head())).refusal, CatchUpRefusal.notYet);
+        expect((await ask(r, 'wallet', PoolCatchUpRequest.frontier())).refusal, CatchUpRefusal.notYet);
+        expect(r.transport.notices['r1w0'], isNull, reason: 'no notice before the round is mined');
+        r.chain.mine();
+        await minedTo(r, 1);
+        expect((await ask(r, 'wallet', PoolCatchUpRequest.head())).round, 1);
+        await until(() async => r.transport.notices['r1w0'] != null, timeout: const Duration(seconds: 30), what: 'the notice');
+        expect(PoolMessage.decode(r.transport.notices['r1w0']!.single), isA<PoolRoundMined>());
+        expect(r.transport.replies['r1w0'], hasLength(1));
+      } finally {
+        await r.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 3)));
+
+    test('A submitter is sent its mined round, and anyone can ask for a round by number later', () async {
+      final r = await _Run.fresh(c, rng, api: false);
+      try {
+        await r._round(1, r.round1Bytes());
+        await minedTo(r, 1);
+        for (int i = 0; i < 4; i++) {
+          final peer = 'r1w$i';
+          await until(() async => r.transport.notices[peer] != null, timeout: const Duration(seconds: 30), what: 'the notice to $peer');
+          expect(r.transport.replies[peer], hasLength(1), reason: 'the replies folder holds only the answer');
+          final notice = PoolMessage.decode(r.transport.notices[peer]!.single) as PoolRoundMined;
+          expect(notice.round, 1);
+          expect([for (final x in notice.ids) hex.encode(x)], [r.submissionIds[i]], reason: 'only its own submission');
+          final stored = (await r.store.read(1))!;
+          expect(hex.encode(notice.witnessTxId), stored.witness.id);
+          expect(hex.encode(notice.roundTxId), stored.round.id);
+          expect(hex.encode(notice.computedMerkleRoot()), r.chain.merkleRootAt(r.chain.minedAt[stored.witness.id]!));
+          expect(r.transport.notices[peer]!.single.length, lessThan(PoolMessage.maxOther), reason: 'no transactions in a notice');
+        }
+        expect(r.server.status.noticesSent, 4);
+
+        await r._round(2, [for (final t in c.f.transfers2) PoolSubmission.of(t, c.f.agg.spendP, rng: rng).encode()]);
+        await minedTo(r, 2);
+        final one = await ask(r, 'late', PoolCatchUpRequest.round(1));
+        expect(one.what, CatchUpKind.round);
+        expect(one.round, 1);
+        expect(one.witnessTx, hex.decode((await r.store.read(1))!.witness.serialize()));
+        expect((await ask(r, 'late', PoolCatchUpRequest.round(3))).refusal, CatchUpRefusal.notYet);
+        // round 1's leaves read from its answer alone reach its block root
+        final layout = ShieldedPoolLayout.of(c.f.agg.tree);
+        final leaves = ShieldedLedger.readLeaves(layout, ShieldedLedger.parse(one.roundTx!), ShieldedLedger.parse(one.witnessTx!));
+        expect(leaves.blockRoot, (PoolMessage.decode(r.transport.entries[1]) as PoolAnnouncement).blockRoot);
+      } finally {
+        await r.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 4)));
+
+    test('An expiry goes to the notices folder, not the replies folder', () async {
+      final r = await _Run.fresh(c, rng, api: false, before: (chain) => chain.mineOnBroadcast = false);
+      try {
+        final bytes = r.round1Bytes();
+        final first = PoolSubmission.decode(bytes.first);
+        r.transport.send('early', bytes.first);
+        await until(() async => r.transport.replies['early'] != null, timeout: const Duration(seconds: 10), what: 'the acceptance');
+        r.server.expired(PoolReply.expired(first.id, 'the anchor left the ring'));
+        await until(() async => r.transport.notices['early'] != null, timeout: const Duration(seconds: 10), what: 'the expiry');
+        final expiry = PoolMessage.decode(r.transport.notices['early']!.single) as PoolReply;
+        expect(expiry.outcome, ReplyOutcome.expired);
+        expect(expiry.id, first.id);
+        expect(r.transport.replies['early'], hasLength(1), reason: 'the replies folder holds only the acceptance');
+        expect(PoolReply.decode(r.transport.replies['early']!.single).isAccepted, isTrue);
+      } finally {
+        await r.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('A flood of catch-up requests never delays a submission, and waits in a bounded queue', () async {
+      final r = await _Run.fresh(c, rng, api: false);
+      try {
+        await r._round(1, r.round1Bytes());
+        await minedTo(r, 1);
+        // each answer to the flood takes 20 ms to send, so requests pile up
+        r.transport.slowPeers['flood'] = const Duration(milliseconds: 20);
+        for (int i = 0; i < 300; i++) {
+          r.transport.send('flood', PoolCatchUpRequest.round(1).encode());
+        }
+        // unreadable requests have no id to answer, and are dropped
+        r.transport.send('flood', Uint8List.fromList([PoolMessage.formatVersion, PoolMessageKind.catchUpRequest.number, 1, 2, 3]));
+        final sub = PoolSubmission.of(c.f.transfers2.first, c.f.agg.spendP, rng: rng);
+        r.transport.send('payer', sub.encode());
+        await until(() async => r.transport.replies['payer'] != null, timeout: const Duration(seconds: 10), what: 'the submission\'s reply');
+        final took = r.transport.repliedAt['payer']!.difference(r.transport.sentAt['payer']!);
+        expect(took, lessThan(const Duration(seconds: 2)));
+        expect(PoolReply.decode(r.transport.replies['payer']!.single).isAccepted, isTrue);
+        await until(() async => (r.transport.replies['flood']?.length ?? 0) + r.server.status.catchUpDropped >= 301,
+            timeout: const Duration(seconds: 60), what: 'the flood answered or dropped');
+        final s = r.server.status;
+        expect(s.catchUpDropped, greaterThan(1), reason: 'the unreadable one, and those past the queue\'s bound');
+        expect(r.transport.replies['flood']!.length, lessThan(300));
+        expect(r.transport.replies['flood']!.length, greaterThanOrEqualTo(PoolServer.maxCatchUpQueue));
+        print('  300 round requests: ${r.transport.replies['flood']!.length} answered, ${s.catchUpDropped - 1} dropped at the queue\'s bound; '
+            'the submission answered in ${took.inMilliseconds} ms');
+      } finally {
+        await r.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 3)));
+
+    test('A restarted server finds its last mined round and answers at it', () async {
+      final r = await _Run.fresh(c, rng, api: false);
+      _Run? again;
+      try {
+        await r._round(1, r.round1Bytes());
+        await minedTo(r, 1);
+        await r.server.stop();
+        again = await r.restart(history: false);
+        expect(again.server.status.minedTip, 1);
+        final head = await ask(again, 'wallet', PoolCatchUpRequest.head());
+        expect(head.round, 1);
+      } finally {
+        await again?.dispose();
+        await r.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 3)));
+  });
 }
 
 /// 50 requests a second across [routes] until told to stop, then the count

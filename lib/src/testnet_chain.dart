@@ -9,7 +9,7 @@ import 'http_json.dart';
 
 /// The endpoints the testnet implementation calls, named so the decoding
 /// of each answer can be tested apart from the transport.
-enum TestnetCall { fetch, chainInfo, txStatus, spent, unspentAll, arcTx }
+enum TestnetCall { fetch, chainInfo, txStatus, proof, spent, unspentAll, arcTx }
 
 /// The chain through ARC and WhatsOnChain, for BSV testnet: a broadcast
 /// goes to ARC in the extended format (each input with the output it
@@ -77,6 +77,22 @@ class TestnetChain implements ChainAccess {
         final height = j['blockheight'];
         if (height is! int || height < 0) throw ChainError(endpoint, 'tx/hash returned a mined transaction without its height');
         return height;
+      case TestnetCall.proof:
+        // 404, or an empty list: not mined yet. WhatsOnChain answers a
+        // list of proofs, one a block the transaction is in; a reorg can
+        // briefly leave two, and the last is the newest
+        if (status == 404) return null;
+        if (status != 200) throw ChainError(endpoint, 'answered $status to a merkle proof: ${_short(body)}');
+        final dynamic j;
+        try {
+          j = jsonDecode(body);
+        } catch (_) {
+          throw ChainError(endpoint, 'answered a merkle proof with a body that is not JSON: ${_short(body)}');
+        }
+        if (j == null) return null;
+        final proof = j is List ? (j.isEmpty ? null : j.last) : j;
+        if (proof == null) return null;
+        return TxPlace.fromTsc(endpoint, txid!, proof);
       case TestnetCall.spent:
         // 200 with the spending transaction: spent; 404: nothing spends it,
         // or nothing to spend, which the caller settles with a fetch
@@ -158,6 +174,9 @@ class TestnetChain implements ChainAccess {
 
   @override
   Future<int?> minedHeight(String txid) async => await _get(TestnetCall.txStatus, 'tx/hash/$txid') as int?;
+
+  @override
+  Future<TxPlace?> placeOf(String txid) async => await _get(TestnetCall.proof, 'tx/$txid/proof/tsc', txid: txid) as TxPlace?;
 
   @override
   Future<bool> unspent(String txid, int vout) async {

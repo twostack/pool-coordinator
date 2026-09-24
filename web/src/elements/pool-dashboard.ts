@@ -100,7 +100,9 @@ export class PoolDashboard extends LitElement {
         <pool-chart .feed=${this.feed} metric="transfers" label="Transfers" bars></pool-chart>
         <pool-chart .feed=${this.feed} metric="balance" label="Pool balance (BSV)" scale="100000000"></pool-chart>
       </div>
-      <footer>Every round links to its transactions on the chain, where it can be checked.</footer>`;
+      ${pool?.explorer
+        ? html`<footer>Every round links to its transactions on the chain, where it can be checked.</footer>`
+        : nothing}`;
   }
 }
 

@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:convert/convert.dart';
 import 'package:dartsv/dartsv.dart';
 import 'package:tstokenlib/tstokenlib.dart';
 
@@ -38,6 +39,25 @@ abstract class RoundStore implements CoordinatorStore {
   /// Round [number], or null when the store has no such round. Throws
   /// [StoreRefusal] when the round is there but cannot be trusted.
   Future<StoredRound?> read(int number);
+
+  /// Round [number]'s round and witness txids, or null when the store has
+  /// no such round. Cheaper than [read] where the store keeps a record.
+  Future<({String round, String witness})?> txidsOf(int number) async {
+    final r = await read(number);
+    return r == null ? null : (round: r.round.id, witness: r.witness.id);
+  }
+
+  /// Round [number]'s round and witness transactions as bytes, as a wallet
+  /// is sent them, or null when the store has no such round. Cheaper than
+  /// [read] where the store keeps the raw bytes: a production witness is
+  /// megabytes, and parsing one holds the server's isolate for about a
+  /// second.
+  Future<({Uint8List round, Uint8List witness})?> rawOf(int number) async {
+    final r = await read(number);
+    return r == null
+        ? null
+        : (round: Uint8List.fromList(hex.decode(r.round.serialize())), witness: Uint8List.fromList(hex.decode(r.witness.serialize())));
+  }
 
   /// The last round, or null when the store is empty.
   Future<StoredRound?> last() async {

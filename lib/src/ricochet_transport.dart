@@ -294,6 +294,10 @@ class RicochetTransport implements PoolTransport {
   Future<void> reply(String peerId, Uint8List bytes) =>
       guarded(() => _send(PeerId.fromString(peerId), bytes, PoolTransport.repliesFolder, 'reply to $peerId'));
 
+  @override
+  Future<void> notify(String peerId, Uint8List bytes) =>
+      guarded(() => _send(PeerId.fromString(peerId), bytes, PoolTransport.noticesFolder, 'notice to $peerId'));
+
   Future<void> _send(PeerId to, Uint8List bytes, String folder, String what) async {
     if (bytes.length > PoolTransport.maxFrame) throw TransportFailure(what, '${bytes.length} bytes is over the transport\'s frame');
     String? why;
@@ -405,6 +409,13 @@ class RicochetTransport implements PoolTransport {
   Future<List<InboxMessage>> readReplies() => guarded(() async {
         final got = await _retrieve(PoolTransport.repliesFolder);
         if (got.isNotEmpty) await _delivered([for (final m in got) m.id], PoolTransport.repliesFolder);
+        return got;
+      });
+
+  /// The notices in this identity's notices folder, marked delivered.
+  Future<List<InboxMessage>> readNotices() => guarded(() async {
+        final got = await _retrieve(PoolTransport.noticesFolder);
+        if (got.isNotEmpty) await _delivered([for (final m in got) m.id], PoolTransport.noticesFolder);
         return got;
       });
 

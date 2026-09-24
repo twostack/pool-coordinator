@@ -48,5 +48,5 @@
 
 ## 7. Record and wrap-up
 
-- [ ] 7.1 Add a dated `docs/DESIGN.md` section for this change: the recorder, the stage mapping, the privacy boundary and its argument, the API, the site and proxy, and the numbers from 4.1 to 4.3 and 5.8. Update `README.md` with running the API, building the site and running the proxy. Verify both sections exist.
-- [ ] 7.2 Run `dart analyze lib bin test` (clean), `dart test`, `dart test test/transport_test.dart`, `POOL_LOCALNET=1 dart test test/chain_node_test.dart test/localnet_e2e_test.dart`, and in `web/` `npm run lint && npm test && npm run build`. Verify all pass, and report the output.
+- [x] 7.1 Add a dated `docs/DESIGN.md` section for this change: the recorder, the stage mapping, the privacy boundary and its argument, the API, the site and proxy, and the numbers from 4.1 to 4.3 and 5.8. Update `README.md` with running the API, building the site and running the proxy. Verify both sections exist.
+- [x] 7.2 Run `dart analyze lib bin test` (clean), `dart test`, `dart test test/transport_test.dart`, `POOL_LOCALNET=1 dart test test/chain_node_test.dart test/localnet_e2e_test.dart`, and in `web/` `npm run lint && npm test && npm run build`. Verify all pass, and report the output.

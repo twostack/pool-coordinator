@@ -27,7 +27,7 @@ class FeedItem {
   const FeedItem(this.sequence, this.content);
 }
 
-/// How the pool's four messages ride the transport. Submissions are read
+/// How the pool's messages ride the transport. Submissions are read
 /// from one folder of the coordinator's mailbox and marked delivered once
 /// consumed, so the mailbox never fills; a reply goes to the sender's
 /// mailbox; the descriptor and every announcement go on one public feed a
@@ -39,6 +39,12 @@ abstract class PoolTransport {
   /// and read.
   static const submissionsFolder = 'pool/submissions';
   static const repliesFolder = 'pool/replies';
+
+  /// The folder a peer is sent what it did not ask for: the mined-round
+  /// notice. Apart from the replies folder, which holds only answers to
+  /// what the peer sent, so a wallet waiting on an answer never takes a
+  /// notice for it.
+  static const noticesFolder = 'pool/notices';
 
   /// The feed under the coordinator's peer id.
   static const feedPath = 'pool/rounds';
@@ -60,6 +66,9 @@ abstract class PoolTransport {
   /// that peer. Retries a failed send up to the configured count, then
   /// throws [TransportFailure].
   Future<void> reply(String peerId, Uint8List bytes);
+
+  /// Sends [bytes] to [peerId]'s notices folder, as [reply] does.
+  Future<void> notify(String peerId, Uint8List bytes);
 
   /// Appends [bytes] to the pool's feed and returns its sequence. Retries a
   /// failed append up to the configured count, then throws

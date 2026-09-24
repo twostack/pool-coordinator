@@ -1,3 +1,5 @@
+import 'package:convert/convert.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:dartsv/dartsv.dart';
 import 'package:tstokenlib/tstokenlib.dart';
 
@@ -41,6 +43,76 @@ class UnspentOutput {
   String toString() => '$outpoint ($satoshis sat)';
 }
 
+/// Where a mined transaction sits: the hash of its block, its index there
+/// and its merkle branch, hashes in the display order a txid is printed in,
+/// from the leaf up. A wallet checks the branch against a header of its
+/// own; the server only passes it on.
+class TxPlace {
+  final String blockHash;
+  final int index;
+  final List<String> branch;
+  const TxPlace(this.blockHash, this.index, this.branch);
+
+  /// The merkle root [branch] computes for [txid] at [index], display order.
+  static String rootOf(String txid, int index, List<String> branch) {
+    var cur = hex.decode(txid).reversed.toList();
+    var i = index;
+    for (final node in branch) {
+      final other = hex.decode(node).reversed.toList();
+      cur = _hash2(i.isEven ? cur : other, i.isEven ? other : cur);
+      i >>= 1;
+    }
+    return hex.encode(cur.reversed.toList());
+  }
+
+  /// The branch of the transaction at [index] in a block of [txids], the
+  /// way a block's merkle tree pairs them: the last of an odd level is
+  /// paired with itself.
+  static List<String> branchFor(List<String> txids, int index) {
+    if (index < 0 || index >= txids.length) throw RangeError.index(index, txids, 'index');
+    var level = [for (final t in txids) hex.decode(t).reversed.toList()];
+    var i = index;
+    final branch = <String>[];
+    while (level.length > 1) {
+      final sib = i ^ 1 < level.length ? level[i ^ 1] : level[i];
+      branch.add(hex.encode(sib.reversed.toList()));
+      level = [for (int k = 0; k < level.length; k += 2) _hash2(level[k], k + 1 < level.length ? level[k + 1] : level[k])];
+      i >>= 1;
+    }
+    return branch;
+  }
+
+  /// A proof in the TSC format the node's `getmerkleproof2` and
+  /// WhatsOnChain's `proof/tsc` answer with: `index`, `txOrId`, `target`
+  /// (the block hash) and `nodes`, where `*` stands for the working hash
+  /// itself (the last transaction of an odd level). Untrusted: anything
+  /// else is a [ChainError].
+  static TxPlace fromTsc(String endpoint, String txid, Object? json) {
+    if (json is! Map<String, dynamic>) throw ChainError(endpoint, 'a merkle proof is not a JSON object');
+    final index = json['index'], target = json['target'], nodes = json['nodes'], of = json['txOrId'];
+    if (index is! int || index < 0 || index > 0xffffffff) throw ChainError(endpoint, 'a merkle proof has no index');
+    if (target is! String || !_isHash(target)) throw ChainError(endpoint, 'a merkle proof names no block');
+    if (of is String && of.length == 64 && of != txid) throw ChainError(endpoint, 'a merkle proof for $txid is of $of');
+    if (nodes is! List || nodes.length > PoolMessage.maxBranch) throw ChainError(endpoint, 'a merkle proof has no nodes');
+    var cur = txid;
+    var i = index;
+    final branch = <String>[];
+    for (final n in nodes) {
+      if (n is! String || (n != '*' && !_isHash(n))) throw ChainError(endpoint, 'a merkle proof has a node that is not a hash');
+      final node = n == '*' ? cur : n;
+      branch.add(node);
+      cur = rootOf(cur, i & 1, [node]);
+      i >>= 1;
+    }
+    return TxPlace(target, index, branch);
+  }
+
+  static List<int> _hash2(List<int> a, List<int> b) =>
+      crypto.sha256.convert(crypto.sha256.convert([...a, ...b]).bytes).bytes;
+
+  static bool _isHash(String s) => RegExp(r'^[0-9a-f]{64}$').hasMatch(s);
+}
+
 /// What the server needs from the chain, and nothing else: it fetches the
 /// genesis and a deposit's covenant, reads the height a deposit's refund is
 /// measured against, publishes rounds, and asks whether a stored round is
@@ -70,6 +142,10 @@ abstract class ChainAccess {
   /// The height [txid] was mined at, or null when it is unknown or still
   /// unconfirmed.
   Future<int?> minedHeight(String txid);
+
+  /// Where [txid] was mined: its block, index and merkle branch, or null
+  /// when it is unknown or not yet mined. A wallet proves a round from it.
+  Future<TxPlace?> placeOf(String txid);
 
   /// Whether output [vout] of [txid] is unspent. False when the transaction
   /// is unknown, since nothing can be spent from it.

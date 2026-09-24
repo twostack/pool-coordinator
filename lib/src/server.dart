@@ -87,6 +87,29 @@ class PoolServer {
   bool _buildInFlight = false;
   RoundTiming? _endedTiming;
 
+  /// The round up to which every round is mined, 0 before round 1. Every
+  /// catch-up answer stands here, never at a round published and not yet
+  /// seen mined, so a head and a frontier asked for back to back agree.
+  int _minedTip = 0;
+
+  /// Accepted submissions by the round that took them in and the peer that
+  /// sent them, until that round is mined and each peer is sent its notice.
+  /// Held in memory only: after a restart a wallet asks for its round by
+  /// number instead.
+  final _accepted = SplayTreeMap<int, Map<String, List<Uint8List>>>();
+
+  /// Catch-up requests waiting for an answer, apart from the inbox so a
+  /// flood of them never delays a submission's reply, and bounded.
+  late final PoolCatchUpResponder _catchUp;
+  final _catchUpQueue = Queue<InboxMessage>();
+  bool _answering = false;
+  static const maxCatchUpQueue = 64;
+
+  /// The last few mined rounds as sent, since wallets ask for the head and
+  /// for their own round again and again.
+  final _minedCache = <int, MinedRound>{};
+  static const _minedCacheSize = 4;
+
   /// Published rounds whose witness is not yet seen mined, by number, and
   /// whether the one loop that watches them is running.
   final _minedQueue = SplayTreeMap<int, String>();
@@ -188,13 +211,16 @@ class PoolServer {
       owner: wallet.owner,
       ownerPub: wallet.ownerPub,
       clock: clock,
-      notify: _notify,
+      notify: expired,
     );
     co.chainHeight = await chain.height();
     lap('coordinator');
 
     await _checkFeed();
     lap('feed');
+    _catchUp = PoolCatchUpResponder(descriptor, _ServerCatchUp(this));
+    await _findMinedTip();
+    lap('mined');
     status.ready = true;
     _openMetrics();
     await _startApi();
@@ -349,9 +375,14 @@ class PoolServer {
   Future<void> _handle(InboxMessage m) async {
     final sender = m.sender;
     try {
-      if (PoolMessage.kindOf(m.payload) != PoolMessageKind.submission) {
+      final kind = PoolMessage.kindOf(m.payload);
+      if (kind == PoolMessageKind.catchUpRequest) {
+        _queueCatchUp(m);
+        return;
+      }
+      if (kind != PoolMessageKind.submission) {
         status.submissionsDropped++;
-        log.info('dropped a message from $sender: not a submission (${m.payload.length} bytes)');
+        log.info('dropped a message from $sender: not a submission or a catch-up request (${m.payload.length} bytes)');
         return;
       }
       final reply = await _depositCheck(m.payload) ?? co.submitBytes(m.payload);
@@ -364,6 +395,7 @@ class PoolServer {
       if (reply.isAccepted) {
         status.submissionsAccepted++;
         _submitters[id] = sender;
+        _accepted.putIfAbsent(reply.round!, () => {}).putIfAbsent(sender, () => []).add(reply.id);
         log.info('submission $id from $sender: accepted into round ${reply.round}');
       } else {
         status.submissionsRefused++;
@@ -420,12 +452,31 @@ class PoolServer {
     }
   }
 
-  /// The library's expired replies, for transfers dropped at close.
-  void _notify(PoolReply reply) {
+  /// The library's expired replies, for transfers it accepted earlier and
+  /// dropped at close. The peer was already answered `accepted`, so this
+  /// is a second message nobody asked for: it goes to the peer's notices
+  /// folder, never the replies folder, where a wallet waiting on an answer
+  /// would take it for one. Public so a test can hand it one, since the
+  /// library expires a transfer only once its anchor has left the ring.
+  void expired(PoolReply reply) {
     final id = hex.encode(reply.id);
     final sender = _submitters.remove(id);
+    for (final bySender in _accepted.values) {
+      bySender[sender]?.removeWhere((x) => hex.encode(x) == id);
+      bySender.removeWhere((_, ids) => ids.isEmpty);
+    }
+    _accepted.removeWhere((_, bySender) => bySender.isEmpty);
     log.info('submission $id: ${reply.outcome.name}: ${reply.sentence}');
-    if (sender != null) unawaited(_reply(sender, reply));
+    if (sender != null) unawaited(_notice(sender, reply));
+  }
+
+  Future<void> _notice(String sender, PoolReply reply) async {
+    try {
+      await transport.notify(sender, reply.encode());
+    } on TransportFailure catch (e) {
+      status.fail('the expiry of submission ${hex.encode(reply.id)} could not be sent: $e');
+      log.warning('the expiry of submission ${hex.encode(reply.id)} for $sender could not be sent: $e');
+    }
   }
 
   // ------------------------------------------------------------ publishing
@@ -541,6 +592,133 @@ class PoolServer {
     }
   }
 
+  // --------------------------------------------------------------- catch-up
+
+  /// The last mined round at start: the stored tip if its witness is mined,
+  /// else the newest stored round below it whose witness is. A round's
+  /// witness mined means every round before it is, since each round spends
+  /// the witness before it. The tip is then watched until it is mined. A
+  /// chain that cannot be asked leaves it at 0 until the watcher sees a
+  /// round mined; until then catch-up is refused as not yet mined.
+  Future<void> _findMinedTip() async {
+    final tip = co.ledger.round;
+    try {
+      for (int n = tip; n >= 1; n--) {
+        final ids = await store.txidsOf(n);
+        if (ids == null) break;
+        if (await chain.minedHeight(ids.witness) != null) {
+          _minedTip = n;
+          break;
+        }
+      }
+    } catch (e) {
+      log.warning('could not read which rounds are mined, so catch-up waits for the next one: $e');
+    }
+    status.minedTip = _minedTip;
+    if (tip > _minedTip) {
+      final ids = await store.txidsOf(tip).catchError((_) => null);
+      if (ids != null) _watchMined(tip, ids.witness);
+    }
+  }
+
+  /// Round [n] is mined: the catch-up tip moves up to it, and every peer
+  /// whose accepted submissions a round up to it took in is sent its notice.
+  void _roundMined(int n) {
+    if (n <= _minedTip) return;
+    _minedTip = n;
+    status.minedTip = n;
+    for (final r in [..._accepted.keys.where((r) => r <= n)]) {
+      unawaited(_sendNotices(r, _accepted.remove(r)!));
+    }
+  }
+
+  Future<void> _sendNotices(int round, Map<String, List<Uint8List>> bySender) async {
+    for (final MapEntry(key: sender, value: ids) in bySender.entries) {
+      try {
+        final notice = await _catchUp.notice(round, ids);
+        if (notice == null) {
+          log.warning('round $round is mined but its place in a block cannot be read; ${ids.length} submitters ask for it instead');
+          continue;
+        }
+        await transport.notify(sender, notice.encode());
+        status.noticesSent++;
+        log.info('round $round mined: sent $sender its notice for ${ids.length} submission${ids.length == 1 ? '' : 's'}');
+      } catch (e) {
+        log.warning('the notice of round $round for $sender could not be sent; it can ask for the round: $e');
+      }
+    }
+  }
+
+  void _queueCatchUp(InboxMessage m) {
+    if (_catchUpQueue.length >= maxCatchUpQueue) {
+      status.catchUpDropped++;
+      log.info('dropped a catch-up request from ${m.sender}: $maxCatchUpQueue are waiting');
+      return;
+    }
+    _catchUpQueue.add(m);
+    if (!_answering) unawaited(_answerCatchUp());
+  }
+
+  /// Answers waiting catch-up requests one at a time, in arrival order. A
+  /// request that does not decode has no id to answer to and is dropped.
+  Future<void> _answerCatchUp() async {
+    _answering = true;
+    try {
+      while (_catchUpQueue.isNotEmpty && !_stopping) {
+        final m = _catchUpQueue.removeFirst();
+        final PoolCatchUpRequest q;
+        try {
+          q = PoolCatchUpRequest.decode(m.payload);
+        } on ProtocolRefusal catch (e) {
+          status.catchUpDropped++;
+          log.info('dropped a catch-up request from ${m.sender}: $e');
+          continue;
+        }
+        final reply = await _catchUp.answer(q);
+        if (reply.isRefused) {
+          status.catchUpRefused++;
+          log.info('catch-up ${q.what.name} from ${m.sender}: refused (${reply.refusal!.name}): ${reply.sentence}');
+        } else {
+          status.catchUpAnswered++;
+          log.fine('catch-up ${q.what.name} from ${m.sender}: answered at round ${reply.what == CatchUpKind.blockRoots ? reply.from : reply.round}');
+        }
+        try {
+          await transport.reply(m.sender, reply.encode());
+        } catch (e) {
+          log.warning('the catch-up answer for ${m.sender} could not be sent: $e');
+        }
+      }
+    } finally {
+      _answering = false;
+    }
+  }
+
+  /// Round [n] as a wallet is sent it: its two transactions as stored, and
+  /// the witness's place in its block from the chain. Kept for the last few
+  /// rounds asked for.
+  Future<MinedRound?> _minedRound(int n) async {
+    final cached = _minedCache[n];
+    if (cached != null) return cached;
+    final ids = await store.txidsOf(n);
+    if (ids == null) return null;
+    final place = await chain.placeOf(ids.witness);
+    if (place == null) return null;
+    final raw = await store.rawOf(n);
+    if (raw == null) return null;
+    final m = MinedRound(
+        number: n,
+        roundTx: raw.round,
+        witnessTx: raw.witness,
+        blockHash: hex.decode(place.blockHash),
+        txIndex: place.index,
+        branch: [for (final b in place.branch) hex.decode(b)]);
+    _minedCache[n] = m;
+    while (_minedCache.length > _minedCacheSize) {
+      _minedCache.remove(_minedCache.keys.first);
+    }
+    return m;
+  }
+
   // --------------------------------------------------------------- metrics
 
   void _openMetrics() {
@@ -607,7 +785,8 @@ class PoolServer {
   }
 
   void _watchMined(int number, String witness) {
-    if (metrics == null) return;
+    // below the mined tip only the history wants a height
+    if (number <= _minedTip && metrics == null) return;
     _minedQueue[number] = witness;
     if (!_watchingMined) unawaited(_watchMinedLoop());
   }
@@ -637,6 +816,7 @@ class PoolServer {
         _minedQueue.remove(n);
         if (height != null) {
           metrics?.mined(n, height);
+          _roundMined(n);
         } else {
           log.warning('round $n\'s witness $txid was not mined within ${config.server.fundingTimeout}; the next start asks again');
         }
@@ -684,5 +864,41 @@ class PoolServer {
     await metrics?.close();
     await transport.close();
     log.info('stopped at round ${co.ledger.round}');
+  }
+}
+
+/// What the server answers catch-up from: its ledger for block roots and
+/// frontiers, its store and the chain for mined rounds, all at or below
+/// the last round it has seen mined.
+class _ServerCatchUp implements CatchUpSource {
+  final PoolServer s;
+  _ServerCatchUp(this.s);
+
+  @override
+  int get minedTip => s._minedTip;
+
+  @override
+  List<int> blockRootOf(int round) => s.co.ledger.blockRootOf(round);
+
+  @override
+  ({int round, List<int> blockRoot, List<List<int>> left}) frontierAt(int round) => s.co.ledger.frontierAt(round);
+
+  @override
+  Future<MinedRound?> mined(int round) => s._minedRound(round);
+
+  /// The store's record and the chain's proof, no transaction read.
+  @override
+  Future<RoundPlace?> placed(int round) async {
+    final ids = await s.store.txidsOf(round);
+    if (ids == null) return null;
+    final place = await s.chain.placeOf(ids.witness);
+    if (place == null) return null;
+    return RoundPlace(
+        number: round,
+        roundTxId: hex.decode(ids.round),
+        witnessTxId: hex.decode(ids.witness),
+        blockHash: hex.decode(place.blockHash),
+        txIndex: place.index,
+        branch: [for (final b in place.branch) hex.decode(b)]);
   }
 }

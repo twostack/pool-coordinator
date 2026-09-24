@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:dartsv/dartsv.dart';
 import 'package:path/path.dart' as p;
 
@@ -121,6 +122,47 @@ class FileRoundStore extends RoundStore {
     final snap = File(p.join(dir, 'snapshot.bin'));
     final snapshot = snap.existsSync() ? await snap.readAsBytes() : null;
     return StoredRound(number, y, round, witness, snapshot);
+  }
+
+  Future<Map<String, dynamic>?> _record(int number) async {
+    final f = File(p.join(_dir(number), 'round.json'));
+    if (!f.existsSync()) return null;
+    try {
+      final r = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+      if (r['version'] != recordVersion || r['number'] != number) throw const FormatException('another record');
+      return r;
+    } catch (e) {
+      throw StoreRefusal(number, 'round.json', 'is not a round record of this server ($e)');
+    }
+  }
+
+  /// The record alone, no transaction parsed.
+  @override
+  Future<({String round, String witness})?> txidsOf(int number) async {
+    final r = await _record(number);
+    if (r == null) return null;
+    final round = r['round'], witness = r['witness'];
+    if (round is! String || witness is! String) throw StoreRefusal(number, 'round.json', 'names no round or witness txid');
+    return (round: round, witness: witness);
+  }
+
+  /// The files as they are, each checked by hashing it against the txid
+  /// the record names (tens of milliseconds for a production witness,
+  /// where parsing it takes about a second).
+  @override
+  Future<({Uint8List round, Uint8List witness})?> rawOf(int number) async {
+    final ids = await txidsOf(number);
+    if (ids == null) return null;
+    Future<Uint8List> raw(String file, String id) async {
+      final f = File(p.join(_dir(number), file));
+      if (!f.existsSync()) throw StoreRefusal(number, file, 'is missing');
+      final bytes = await f.readAsBytes();
+      final got = hex.encode(crypto.sha256.convert(crypto.sha256.convert(bytes).bytes).bytes.reversed.toList());
+      if (got != id) throw StoreRefusal(number, file, 'hashes to $got, and the record names $id; it may be cut short');
+      return bytes;
+    }
+
+    return (round: await raw('round.tx', ids.round), witness: await raw('witness.tx', ids.witness));
   }
 
   /// Whether round [number]'s files are all present, for a test that asks

@@ -21,6 +21,11 @@ class ServerStatus {
   final List<String> failures = [];
   int? lastAnnouncedRound, lastAnnouncementSequence;
   int submissionsAccepted = 0, submissionsRefused = 0, submissionsDropped = 0;
+
+  /// The round up to which every round is mined, which catch-up answers
+  /// stand at, and what the catch-up service has done.
+  int minedTip = 0;
+  int catchUpAnswered = 0, catchUpRefused = 0, catchUpDropped = 0, noticesSent = 0;
   DateTime updatedAt = DateTime.now();
 
   static const keptFailures = 20;
@@ -56,6 +61,8 @@ class ServerStatus {
         'failures': failures,
         'lastAnnouncement': lastAnnouncedRound == null ? null : {'round': lastAnnouncedRound, 'sequence': lastAnnouncementSequence},
         'submissions': {'accepted': submissionsAccepted, 'refused': submissionsRefused, 'dropped': submissionsDropped},
+        'minedTip': minedTip,
+        'catchUp': {'answered': catchUpAnswered, 'refused': catchUpRefused, 'dropped': catchUpDropped, 'notices': noticesSent},
         'updatedAt': updatedAt.toUtc().toIso8601String(),
       };
 

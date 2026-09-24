@@ -103,6 +103,28 @@ class FakeChain implements ChainAccess {
   @override
   Future<int?> minedHeight(String txid) async => minedAt[txid];
 
+  /// The transactions mined at [height], in the order they were mined:
+  /// the fake chain's block there.
+  List<String> blockAt(int height) => [for (final e in minedAt.entries) if (e.value == height) e.key];
+
+  /// A made-up hash for the block at [height]; nothing checks it but the
+  /// tests, which compare branches with [merkleRootAt].
+  static String blockHashAt(int height) => height.toRadixString(16).padLeft(64, '0');
+
+  String merkleRootAt(int height) {
+    final txs = blockAt(height);
+    return TxPlace.rootOf(txs.first, 0, TxPlace.branchFor(txs, 0));
+  }
+
+  @override
+  Future<TxPlace?> placeOf(String txid) async {
+    final h = minedAt[txid];
+    if (h == null) return null;
+    final txs = blockAt(h);
+    final i = txs.indexOf(txid);
+    return TxPlace(blockHashAt(h), i, TxPlace.branchFor(txs, i));
+  }
+
   @override
   Future<bool> unspent(String txid, int vout) async {
     unspentCalls++;
@@ -236,6 +258,9 @@ class FakeTransport implements PoolTransport {
   /// Sends that fail before one succeeds: each reply or announce consumes
   /// this many failures first.
   int failNextSends = 0;
+
+  /// Peers whose replies take this long to send, as a slow link would.
+  final slowPeers = <String, Duration>{};
   int retries;
   bool closed = false;
 
@@ -275,9 +300,21 @@ class FakeTransport implements PoolTransport {
   Future<void> reply(String peerId, Uint8List bytes) async {
     replyAttempts[peerId] = (replyAttempts[peerId] ?? 0) + 1;
     await _attempt('reply to $peerId');
+    final slow = slowPeers[peerId];
+    if (slow != null) await Future<void>.delayed(slow);
     replies.putIfAbsent(peerId, () => []).add(bytes);
     repliedAt.putIfAbsent(peerId, DateTime.now);
     log.add('reply $peerId');
+  }
+
+  /// What each peer was sent unasked, apart from its replies.
+  final notices = <String, List<Uint8List>>{};
+
+  @override
+  Future<void> notify(String peerId, Uint8List bytes) async {
+    await _attempt('notice to $peerId');
+    notices.putIfAbsent(peerId, () => []).add(bytes);
+    log.add('notice $peerId');
   }
 
   @override

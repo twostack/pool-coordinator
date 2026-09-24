@@ -8,7 +8,7 @@ import 'http_json.dart';
 
 /// The RPC methods the node implementation calls, named so the decoding
 /// of each answer can be tested apart from the transport.
-enum NodeCall { fetch, height, broadcast, mined, txout, validate, unspent }
+enum NodeCall { fetch, height, broadcast, mined, block, proof, txout, validate, unspent }
 
 /// The node's own refusal of a call, as its JSON-RPC error.
 class _RpcError implements Exception {
@@ -86,6 +86,7 @@ class NodeChain implements ChainAccess {
       switch (call) {
         case NodeCall.fetch:
         case NodeCall.mined:
+        case NodeCall.block:
           if (e.code == -5) return null;
           throw ChainError(endpoint, 'refused $call: ${e.message} (${e.code})');
         case NodeCall.broadcast:
@@ -122,6 +123,16 @@ class NodeChain implements ChainAccess {
         final height = result['blockheight'];
         if (height is! int || height < 0) throw ChainError(endpoint, 'getrawtransaction returned a mined transaction without its height');
         return height;
+      case NodeCall.block:
+        if (result == null) return null;
+        if (result is! Map<String, dynamic>) throw ChainError(endpoint, 'getrawtransaction returned something other than a transaction');
+        final confirmations = result['confirmations'];
+        if (confirmations == null || (confirmations is int && confirmations < 1)) return null;
+        final block = result['blockhash'];
+        if (block is! String || !_isTxid(block)) throw ChainError(endpoint, 'getrawtransaction returned a mined transaction without its block');
+        return block;
+      case NodeCall.proof:
+        return TxPlace.fromTsc(endpoint, txid!, result);
       case NodeCall.txout:
         if (result == null) return false;
         if (result is! Map<String, dynamic>) throw ChainError(endpoint, 'gettxout returned something other than an output');
@@ -170,6 +181,17 @@ class NodeChain implements ChainAccess {
 
   @override
   Future<int?> minedHeight(String txid) async => await _call(NodeCall.mined, 'getrawtransaction', [txid, 1]) as int?;
+
+  /// The block from the verbose `getrawtransaction`, then the node's own
+  /// merkle proof of the transaction in it (`getmerkleproof2`, TSC format).
+  @override
+  Future<TxPlace?> placeOf(String txid) async {
+    final block = await _call(NodeCall.block, 'getrawtransaction', [txid, 1]) as String?;
+    if (block == null) return null;
+    final place = await _call(NodeCall.proof, 'getmerkleproof2', [block, txid], txid: txid) as TxPlace;
+    if (place.blockHash != block) throw ChainError(name, 'the merkle proof of $txid names block ${place.blockHash}, not $block');
+    return place;
+  }
 
   @override
   Future<bool> unspent(String txid, int vout) async => await _call(NodeCall.txout, 'gettxout', [txid, vout, true]) as bool;

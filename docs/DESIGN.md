@@ -221,8 +221,7 @@ the server's call volume, and TAAL's actual scriptSig limit.
 
 A landing page shows the pool's rounds as they are mined, the round being
 worked on, and the pool's figures. The coordinator keeps the history and
-serves it read-only; a static site behind a colocated proxy reads it. This
-section covers the coordinator's half; the site and the proxy follow.
+serves it read-only; a static site behind a colocated proxy reads it.
 
 Before any of it, the server was brought up to tstokenlib's block roots
 (`sp-block-roots`): announcements now carry the round's block root, which
@@ -277,6 +276,86 @@ is not a path with its own 500 (now the API's 400), and `dart:io` answers
 a request line it cannot parse with a plain 400 before any route sees it,
 which the spec now allows.
 
+### The site
+
+The page (`web/`) is static files: Lit elements in TypeScript, built by
+Vite, with uPlot for the charts. Node runs at build time only. One feed
+(`web/src/feed.ts`) holds everything the elements show, so they never
+disagree: the summary, the statistics, the rounds held (one per number,
+oldest first) and the live state. It holds one event stream for the whole
+page. When the stream drops, it reads the rounds mined meanwhile from the
+history on reconnect, and a round event past a gap fills the gap the same
+way.
+
+A browser's `EventSource` never passes the stream's heartbeat comments
+to the page, and an idle pool sends no events for hours, so the stream
+alone cannot say whether the coordinator is alive. The feed asks for
+`/api/pool` whenever it has heard nothing for a publication interval.
+Silence for twice the interval plus 15 s shows a stale notice with the
+last update, and the page keeps its cards. At the 200-subscriber cap that
+is under 7 requests a second, and only while the pool is quiet.
+
+The rounds scroll sideways, oldest to newest, then the round being built
+with its stages, then the next round. The next round's card says it is
+waiting for transfers, or that it is assembling, with a countdown to the
+deadline. It never shows a pending count. A round's live card becomes its
+mined card in place. The scroll stays pinned to the newest card unless
+the viewer has scrolled away, and pages older rounds in at the left end
+without moving the cards in view.
+
+API data is text, never markup. Lit escapes what it interpolates, and
+the lint bans `unsafeHTML` and the other unsafe directives, the DOM's HTML
+setters and `eval`. A test serves `<img src=x onerror=alert(1)>` as the
+network name and as a txid, and finds it shown literally with no element
+made from it. Links go only to WhatsOnChain, and only for a txid of
+exactly 64 hex characters. The coordinator names the explorer (`main`,
+`test`, or none for regtest, which reports network `test` like testnet),
+and the page picks the origin from a fixed table, so no served string
+becomes a URL.
+
+The page fits 360 px without sideways page scroll. The round scroll takes
+focus and moves with the arrow keys, Page Up and Down, Home and End. The
+stage animation stops under reduced motion, and the page follows the
+system's light or dark theme.
+
+### The proxy
+
+`deploy/Caddyfile` puts the site and the API behind one public name.
+Caddy terminates TLS with automatic certificates and serves `web/dist`.
+Vite names each asset by its content, so assets are cached as immutable
+and the page itself is revalidated. Under `/api/`, anything but GET or
+HEAD gets 405 at the proxy and never reaches the coordinator. The
+coordinator's own cache headers pass through, which lets a browser or CDN
+keep a page of mined rounds for good. The event stream is flushed as
+written and left uncompressed, since compression would buffer it. The
+proxy also sets a content security policy that allows the page's own
+origin only, HSTS, `nosniff` and no referrer, and drops the Server
+header.
+
+The rate limit is 120 requests a minute per client address on `/api/`.
+A page load is about six requests and each page of older rounds one, so
+a viewer never meets it, but a scraper does. It is the `caddy-ratelimit`
+module, which the standard Caddy build, Homebrew's included, lacks. The
+standard build refuses the file with "rate_limit is not a registered
+directive" rather than running without a limit. `deploy/README.md` has
+the `xcaddy` build line.
+
+`tool/dashboard_e2e.sh` checks it all together on localnet:
+- It validates the configuration and checks the adapted configuration
+  for the rate limit, the policy, the unbuffered events and the
+  read-only gate.
+- It runs the localnet end-to-end test in a mode where the test waits for
+  the browser before round 1.
+- It puts Caddy on `https://localhost:8443` with a certificate from
+  Caddy's own CA, kept in a temporary folder and never added to the
+  system trust store.
+- It runs a browser test through the proxy.
+
+The page loaded with the policy, and the browser blocked nothing under
+it. Round 1 appeared live, first as a card being built, then as a mined
+card with its txids as text (regtest). POST, PUT, DELETE and PATCH got
+405, and a burst of 150 requests met 429s at the proxy.
+
 ### Measured
 
 `tool/scratch/metrics_probe.dart`, on the M3 Pro:
@@ -308,3 +387,27 @@ which the spec now allows.
 - The site's first load, every file `vite build` writes to `web/dist/`
   gzipped: 38.4 KB (36.7 KB of it the script, Lit and uPlot included)
   against the 150 KB budget, which `npm run build` enforces.
+
+## 2026-09-24: answering wallets (change `wallet-catch-up`)
+
+The cloak wallet needs more from the coordinator than submission replies: to join a running pool without reading its whole feed, to prove a payment after later rounds are mined, and to learn where its change and deposits landed. tstokenlib's change `wallet-rounds` moved the protocol to version 3 for this: catch-up requests carry a random id their replies echo, a reply can be a refusal, a mined round can be asked for by number, and a pool sends its submitters a notice. The server's half is below.
+
+**Answers stand at the last mined round.** The ledger counts the rounds the server has published, which may not be mined yet. So the server keeps its own count of the last round whose witness it has seen mined, and every answer stands there:
+- At start it walks down from the stored tip to the first mined witness. A mined witness means every earlier round is mined, since each round spends the witness before it.
+- The mined watcher, which used to run only for the dashboard's history, now always runs and raises the count.
+
+A head and a frontier asked for back to back therefore agree, unless a round is mined between the two. A test that points the answers at the ledger's round instead fails.
+
+**Catch-up never waits in front of a submission.** Anyone can send catch-up requests, and a round answer reads megabytes. So requests leave the inbox at once for a queue of at most 64, answered one at a time by their own loop.
+
+**Where a witness sits comes from the chain.** It is the verbose `getrawtransaction` for the block, then the node's `getmerkleproof2`; on testnet it is WhatsOnChain's `proof/tsc`. The TSC format's `*` node is resolved as it is read. The round's two transactions come from the store as stored, checked by hashing their bytes against the record's txids, because parsing a production witness holds the server's isolate for about a second. The last four mined rounds are cached.
+
+**Submitters are told.** Each accepted submission is held by round and peer until that round is mined, then the peer is sent one notice naming its own ids, in a folder of its own (`pool/notices`). libcloak's review found the first version's notices in the replies folder, where a wallet waiting on an answer took a notice for it. The expired reply for a transfer accepted and then dropped at close was unasked in the same way, and now goes there too. A notice carries no transactions, only the txids and the witness's place in its block: 141 bytes, where carrying both transactions was 2.6 MB at production, once per submitter per round. The server builds it from the store's record and the chain's proof, reading no transaction file. This is the private path to a wallet's round. Asking for a round by number tells the pool which round the asker cares about, so that is left to recovery after a restart, since the record is held in memory.
+
+Measured:
+
+| What | Result |
+|---|---|
+| Flood test: 300 round requests from one peer, each answer 20 ms to send | 67 answered, 233 dropped at the bound |
+| Submission sent after the flood | answered in 689 ms, against the 2 s bound |
+| Every branch received over ricochet on localnet (two notices, the head, round 1 by number) | computes the merkle root the node's `getblock` states for its block |
