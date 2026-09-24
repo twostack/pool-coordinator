@@ -411,3 +411,51 @@ Measured:
 | Flood test: 300 round requests from one peer, each answer 20 ms to send | 67 answered, 233 dropped at the bound |
 | Submission sent after the flood | answered in 689 ms, against the 2 s bound |
 | Every branch received over ricochet on localnet (two notices, the head, round 1 by number) | computes the merkle root the node's `getblock` states for its block |
+
+## 2026-09-25: versioned releases (change `release-packages`)
+
+The coordinator used to install only as a developer runs it: five sibling repositories, the Dart SDK, Rust, and `dart run` from the source tree. A tag `vX.Y.Z` now publishes a GitHub release with a Debian package for amd64 and for arm64, a signed and notarized disk image for Apple Silicon, and `SHA256SUMS`. An install needs no toolchain, and `pool-coordinator check` says what it can do. The first was v0.1.0.
+
+**Everything comes from pub.dev.** A git dependency on ricochet-dart-client failed: pub refuses an absolute path in any pubspec it fetches, even for a dependency the root overrides, and ricochet-dart-client, dart-libp2p-merkle-crdt and merkledag all named their siblings that way. They were published instead (merkledag 1.0.1, dart_libp2p_merkle_crdt 1.0.0, ricochet 0.1.0), and so was tstokenlib 2.0.1, whose kernel loader now also looks beside the running program and in `../lib` from it. `pubspec.lock` is committed and the release resolves it with `--enforce-lockfile`. A gitignored `pubspec_overrides.yaml` points development at the sibling checkouts, and a lock written with it in place names local paths, so it must not be committed.
+
+**The kernels are built from the pinned tstokenlib.** Its crate ships in the pub.dev package as source, found through the package config and built outside the pub cache. The build comes before the test suite, since ML-KEM exists only in the native crate. Each release job also runs tstokenlib's byte-identity test of the native kernels against the Dart ones on that platform, which is what makes shipping a prebuilt library safe.
+
+**SQLite by its runtime name.** On Linux the `sqlite3` package asks for `libsqlite3.so`, which only `libsqlite3-dev` installs. Wherever the history is opened, in whichever isolate, the coordinator first points the package at `libsqlite3.so.0`, and the package depends on `libsqlite3-0`.
+
+**The Debian package follows go-ricochet's.**
+- **The service:** a `pool-coordinator` system user without a login shell, and a supervisor program that runs `run.sh` as that user.
+- **The secrets:** `run.sh` exports them from `/etc/pool-coordinator/env` (root-owned, group-readable, 640), never on the command line. `create` goes through the same wrapper, since it needs the passphrase too.
+- **The config directory:** `create` writes the genesis by renaming a temporary file over `config.yaml`, so `/etc/pool-coordinator` is group-writable with the sticky bit (1770). The service can replace its own config but not the root-owned env file.
+- **Install and upgrade:** a first install is left stopped, and an upgrade restarts only a running service. Purge deletes the data, the wallet included, and the installer says to back it up.
+
+`tool/deb_e2e.sh` checks all of this in a clean Ubuntu 22.04 container on localnet: a pool created and run under supervisor, `/api/pool` served without `libsqlite3-dev`, no secret in `/proc/<pid>/cmdline` or the logs (with a mutation that puts one there), both upgrades, removal and purge.
+
+**The first run on Linux found two test faults.** The release was retagged twice before it published; a failed run publishes nothing.
+- `wallet_test` read a file mode with BSD `stat -f %Lp`, which on Linux reports the filesystem instead. It now reads the mode through Dart's `FileStat`.
+- A metrics test that proves a real round had the default 30 s timeout, which the amd64 runner exceeded. It now allows 2 minutes, like its neighbours.
+
+Measured on the v0.1.0 release run (hosted runners):
+
+| Artifact | Size |
+|---|---|
+| `pool-coordinator_0.1.0_amd64.deb` | 4.6 MB |
+| `pool-coordinator_0.1.0_arm64.deb` | 4.2 MB |
+| `pool-coordinator-0.1.0-macos-arm64.tar.gz` (as built; replaced by the image below) | 5.7 MB |
+| `pool-coordinator-0.1.0-macos-arm64.dmg` (signed, notarized, stapled) | 6.2 MB |
+
+All three are well under the 40 MB bound; the binary is 14.7 MB and the kernels 0.8 MB uncompressed.
+
+| Job | Total | Kernels | Suite | Byte-identity | Compile and package | Smoke test |
+|---|---|---|---|---|---|---|
+| Linux amd64 (`ubuntu-22.04`) | 17 min 7 s | 12 s | 14 min 17 s | 84 s | 23 s | 16 s |
+| Linux arm64 (`ubuntu-22.04-arm`) | 11 min 11 s | 16 s | 8 min 40 s | 68 s | 18 s | 17 s |
+| macOS arm64 (`macos-14`) | 13 min 18 s | 19 s | 10 min 54 s | 74 s | 15 s | under 1 s |
+
+The suite dominates each job. The site builds once in 19 s and publishing takes 9 s. The hosted macOS runner has Metal, and `check` reports it available there.
+
+**The macOS artifact is a signed, notarized and stapled disk image.** v0.1.0's first macOS artifact was an unsigned tarball, and a browser download of it was killed at start: Gatekeeper refuses quarantined code it cannot vouch for (exit 137).
+- **Signing and notarizing the bare files was not enough.** Signing the binary and library with the Werkswinkel Developer ID under the hardened runtime, and notarizing them, still left Gatekeeper on this Mac calling them "Unnotarized Developer ID". A bare Mach-O cannot hold a ticket, so it depends on an online lookup, and syspolicyd here could not reach its notarization daemon.
+- **The stapled image works.** It carries its ticket, which macOS reads when the quarantined image is opened, and the quarantined program copied out of it runs; cloak-cli had already found this.
+- **One entitlement.** The binary needs `allow-unsigned-executable-memory`: the Dart AOT runtime maps its snapshot as executable memory without MAP_JIT, and it is killed at start with no entitlement and with `allow-jit` alone.
+- **The flow.** The workflow now leaves the release a draft. `scripts/sign-macos-release.sh` makes the image from the tarball built on the runner, notarizes and staples it, checks it as a downloader gets it, and swaps it in with a rewritten `SHA256SUMS`. v0.1.0's tarball was replaced this way; notarization took about a minute, and the `.deb` checksums are unchanged.
+

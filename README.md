@@ -6,7 +6,7 @@ The library, the protocol and the pool's specs live in `../tstokenlib`; this rep
 
 ## Releases
 
-Each tag `vX.Y.Z` publishes a GitHub release of this repository with a Debian package for amd64 and for arm64 (`pool-coordinator_X.Y.Z_<arch>.deb`, Ubuntu 22.04 and later, Debian 12), a tarball for Apple Silicon Macs (`pool-coordinator-X.Y.Z-macos-arm64.tar.gz`, macOS 14 and later), and `SHA256SUMS`. They need no Dart, Rust or Node: the kernels and the web site are inside. `pool-coordinator check` says what an install can do. Install instructions follow in a later change; the packaging is `deploy/debian/`, `scripts/` and `.github/workflows/release.yml`, and `./build-deb.sh` and `scripts/package-macos.sh` build the same packages locally.
+Each tag `vX.Y.Z` publishes a GitHub release of this repository with a Debian package for amd64 and for arm64 (`pool-coordinator_X.Y.Z_<arch>.deb`, Ubuntu 22.04 and later, Debian 12), a disk image for Apple Silicon Macs (`pool-coordinator-X.Y.Z-macos-arm64.dmg`, macOS 14 and later, signed with the Werkswinkel Developer ID and notarized), and `SHA256SUMS`. They need no Dart, Rust or Node: the kernels and the web site are inside. `pool-coordinator check` says what an install can do. Install instructions follow in a later change; the packaging is `deploy/debian/`, `scripts/` and `.github/workflows/release.yml`, and `./build-deb.sh` and `scripts/package-macos.sh` build the same packages locally. The workflow leaves each release a draft until the signed macOS disk image is built on a Mac with the Developer ID certificate; [docs/RELEASING.md](docs/RELEASING.md) has the steps.
 
 ## Running from source
 

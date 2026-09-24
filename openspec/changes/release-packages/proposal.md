@@ -6,7 +6,7 @@ The coordinator installs today only the way a developer runs it: check out five 
 
 - **Versioned releases on GitHub.** Pushing a tag `vX.Y.Z` builds and publishes a GitHub release of `twostack/pool-coordinator` with:
   - `pool-coordinator_X.Y.Z_amd64.deb` and `pool-coordinator_X.Y.Z_arm64.deb`
-  - `pool-coordinator-X.Y.Z-macos-arm64.tar.gz`
+  - `pool-coordinator-X.Y.Z-macos-arm64.dmg`
   - `SHA256SUMS`
   
   Each artifact is built on a native runner for its platform and smoke-tested before it is attached.
@@ -18,12 +18,12 @@ The coordinator installs today only the way a developer runs it: check out five 
   - **Service:** a `pool-coordinator` system user owns `/var/lib/pool-coordinator` (wallet, identity, store, status, history) and `/var/log/pool-coordinator`, and a supervisor program runs it.
   - **Install and upgrade:** a first install leaves the service stopped, because the pool must be created first. An upgrade restarts it only if it was running. Purge removes the data.
   - **Dependencies:** `supervisor`, `libsqlite3-0` and `ca-certificates`; Caddy is suggested.
-- **The macOS tarball** holds the same tree under `pool-coordinator-X.Y.Z/`:
+- **The macOS disk image** holds the same tree under `pool-coordinator-X.Y.Z/` (built as a tarball on the runner, turned into the image on the publisher's Mac):
   - `bin/pool-coordinator`
   - `lib/libstark_kernels.dylib`
   - `web/`, `config.example.yaml` and `Caddyfile`
   
-  It is unsigned (a Homebrew tap is the next change).
+  It is signed with the Developer ID, notarized and stapled, on a Mac that holds the certificate, before the release is published (a Homebrew tap is the next change).
 - **Local builds** mirror the release:
   - `scripts/package-deb.sh` builds the `.deb` on Linux.
   - `build-deb.sh` runs it inside an Ubuntu 22.04 container from a Mac, as go-ricochet's does.
@@ -39,7 +39,7 @@ Numbers held:
 Non-functional contract:
 - **Untrusted input:** the packages read nothing from the network at install. Downloads are checked against `SHA256SUMS`.
 - **Secrets and privacy:** secrets live only in the 640 env file, and reach the process through the environment, never argv or logs. Package scripts never print or copy them. Purge deletes them.
-- **Trust:** the macOS tarball is unsigned. Checksums and the GitHub release are the provenance until signing is taken on.
+- **Trust:** the macOS program and kernels are signed with the Werkswinkel Developer ID and notarized; the Debian packages rely on the checksums and the GitHub release.
 - **Determinism:** the dependencies and toolchains are pinned and the lockfile is committed, so a tag rebuilds the same dependency set.
 - **Compatibility:**
   - Ubuntu 22.04 and later, and Debian 12, on amd64 and arm64.
@@ -71,4 +71,4 @@ tstokenlib specs this builds on: `native-kernels` (the kernels' ABI check and th
   - `.github/workflows/release.yml`.
 - **tstokenlib:** the kernel loader looks beside the executable (`lib/src/crypto/stark_kernels.dart`), with a test.
 - **CI:** GitHub Actions runners `ubuntu-22.04`, `ubuntu-22.04-arm` and `macos-14`, with Dart 3.11, Rust 1.84 and Node 20 pinned.
-- **Out of scope:** the Mac and Linux install instructions, and a Homebrew tap (the next change); signing and notarization; Intel Macs.
+- **Out of scope:** the Mac and Linux install instructions, and a Homebrew tap (the next change); signing the Debian packages; Intel Macs.

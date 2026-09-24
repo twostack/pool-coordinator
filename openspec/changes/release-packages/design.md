@@ -18,7 +18,7 @@ Measured here: `dart compile exe bin/pool_coordinator.dart` builds a 14 MB binar
 
 **Non-Goals:**
 - Cross-compiling. Each artifact is built on its own platform, since the kernels are native code.
-- Signing, notarization, a Homebrew formula, apt repository hosting and install documentation. That is the next change.
+- A Homebrew formula, apt repository hosting and install documentation. That is the next change. (macOS signing and notarization were first a non-goal; D8 adds them.)
 - Windows and Intel Macs.
 
 ## Decisions
@@ -68,7 +68,7 @@ The layout and scripts follow ricochet's, with these differences:
 ### D6. The macOS tarball
 `scripts/package-macos.sh` builds `pool-coordinator-X.Y.Z/`, holding `bin/pool-coordinator`, `lib/libstark_kernels.dylib` (built with `--features metal`), `web/`, `config.example.yaml` and `Caddyfile`, and packs it as `pool-coordinator-X.Y.Z-macos-arm64.tar.gz`.
 
-It is unsigned. A file fetched by `curl` or Homebrew carries no quarantine attribute, and one fetched by a browser needs `xattr -d com.apple.quarantine`, which the next change's instructions give.
+It was first shipped unsigned (v0.1.0's first tarball), and a copy downloaded through a browser was killed at start by Gatekeeper; D8 signs and notarizes it.
 
 ### D7. One workflow, native runners
 `.github/workflows/release.yml` runs on `v*` tags:
@@ -99,6 +99,22 @@ Alternatives:
   Both are far under the 40 MB bound, so no stripping is needed. The amd64 package builds in Docker under emulation on the M3 Pro, with the kernels in 22 s.
 - **`tool/deb_e2e.sh`** runs group 4 in a clean Ubuntu 22.04 container against localnet: install, create, run, upgrade, remove and purge. It uses `tool/ricochet_up.dart` for a throwaway ricochet server on the host. Under emulation, a process's `/proc/<pid>/cmdline` begins with the emulator's path, so the harness finds the coordinator by its path anywhere in the command line.
 - **The store directory appears with the pool's first round.** A pool at genesis has none, so the upgrade check compares what the data directory held before and after rather than naming the store.
+
+### D8. The macOS artifact signed, notarized and stapled on the publisher's Mac, as a disk image
+Added after v0.1.0 shipped: an unsigned tarball fetched through a browser is quarantined, and Gatekeeper kills the program (exit 137, `spctl`: rejected). The user chose to sign on the Mac that holds the Developer ID certificate rather than put the certificate in CI.
+- **The flow:** the workflow still builds, tests and smoke-tests the tarball on a clean runner from the tag, but leaves the release a draft. `scripts/sign-macos-release.sh vX.Y.Z` then does the rest, following cloak-cli's `tool/release/macos.sh`:
+  - downloads the tarball and checks it against the draft's `SHA256SUMS`;
+  - signs the kernel library and the binary with `Developer ID Application: Werkswinkel Pte Ltd (32XLPKQ5TF)`, hardened runtime and a secure timestamp;
+  - packs the directory into a disk image and signs it;
+  - notarizes the image (`notarytool`, a keychain profile) and staples the ticket to it;
+  - quarantines a copy, copies the directory out and runs the program;
+  - puts the image in place of the tarball, rewrites `SHA256SUMS`, and publishes the release.
+
+  The program in the image is the one built from the tag; only its signatures are added locally.
+- **One entitlement:** `com.apple.security.cs.allow-unsigned-executable-memory` (`deploy/macos/pool-coordinator.entitlements`). The Dart AOT runtime maps its snapshot as executable memory without MAP_JIT: measured, the hardened-runtime binary is killed at start with no entitlement and with `allow-jit` alone, and runs with this one. Library validation stays on, so the kernel library loads only because it carries the same team's signature.
+- **A disk image, not a tarball, because a ticket must be stapled.** The first attempt notarized the bare binary and library in the tarball. Apple accepted them, and the tickets were retrievable from Apple's ticket service by code hash. Yet Gatekeeper on the publisher's Mac still ran its assessment offline (syspolicyd: "Error checking with notarization daemon: 3") and killed the quarantined program as "Unnotarized Developer ID". A bare Mach-O cannot hold a ticket, so it depends on that online lookup. A stapled disk image carries its ticket, which macOS reads when the quarantined image is opened, so the directory copied out of it runs. cloak-cli had already found this.
+- **Checked by running, not by `spctl`:** `spctl --type exec` judges app bundles, so the check is to run the quarantined program copied out of the quarantined image. The image itself is assessed with `spctl --type open` (accepted, "Notarized Developer ID").
+- **v0.1.0:** its unsigned tarball was replaced in place with the signed, notarized and stapled image, and `SHA256SUMS` rewritten (the user's choice); the code is identical, the `.deb` lines are unchanged, and no instructions pointed at the tarball yet.
 
 ## Risks / Trade-offs
 

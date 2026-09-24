@@ -42,8 +42,8 @@
 ## 5. The release workflow
 
 - [x] 5.1 Write `.github/workflows/release.yml` per D7, with a first job refusing a tag that disagrees with `pubspec.yaml`. Verify "A tag whose version disagrees" by running the version check script locally with a mismatched tag (it exits non-zero naming both). Also verify that the workflow with the check removed would have gone on (the mutation check).
-- [ ] 5.2 The build jobs run analyze, the suite, tstokenlib's native byte-identity test against the built kernels, the packaging and the smoke test. The publish job writes `SHA256SUMS`, fails an artifact over 40 MB, and creates the release. Verify by pushing the first release tag `v0.1.0` (the user chose this over a release candidate, since a failed run publishes nothing): all three builds and the release succeed; the artifacts download and `sha256sum -c SHA256SUMS` passes, and each package's `check` passes.
-- [ ] 5.3 Record in `docs/DESIGN.md`, in a dated section for this change, what the pre-release measured:
+- [x] 5.2 The build jobs run analyze, the suite, tstokenlib's native byte-identity test against the built kernels, the packaging and the smoke test. The publish job writes `SHA256SUMS`, fails an artifact over 40 MB, and creates the release. Verify by pushing the first release tag `v0.1.0` (the user chose this over a release candidate, since a failed run publishes nothing): all three builds and the release succeed; the artifacts download and `sha256sum -c SHA256SUMS` passes, and each package's `check` passes.
+- [x] 5.3 Record in `docs/DESIGN.md`, in a dated section for this change, what the pre-release measured:
   - each artifact's size, against the 40 MB bound;
   - each build job's time;
   - the binary's compile time.
@@ -54,3 +54,14 @@
 
 - [x] 6.1 Add a short "Releases" note to `README.md` (where artifacts are, and that the install instructions follow), and add `pubspec_overrides.yaml` to the development steps. Verify both exist.
 - [x] 6.2 Run `dart analyze lib bin test`, `dart test`, the transport suite and the localnet suites on the pinned dependencies, and the web lint, test and build. Verify all pass, and report the output.
+
+## 7. Signing the macOS tarball
+
+- [x] 7.1 `deploy/macos/pool-coordinator.entitlements` (only `allow-unsigned-executable-memory`) and `scripts/sign-macos-release.sh` (the tarball into a signed, notarized, stapled disk image), per D8. Verify: the hardened-runtime binary is killed with no entitlement and with `allow-jit` alone, and runs `check` with this one (measured, the reason for the entitlement); shellcheck is clean.
+- [x] 7.2 The workflow's publish job creates the release as a draft. Verify with actionlint.
+- [x] 7.3 Sign, notarize and staple v0.1.0's image, and put it in place of the tarball with a rewritten `SHA256SUMS`. Verify:
+  - The release's files, downloaded again, match the new `SHA256SUMS`, and the two `.deb` lines are unchanged.
+  - The image, quarantined as a browser marks it, validates its staple and `spctl --type open` accepts it as notarized Developer ID code.
+  - The directory copied out of it, still quarantined, runs `check` from `/`.
+- [x] 7.4 Record the signing flow and what it measured in the change's `docs/DESIGN.md` section.
+

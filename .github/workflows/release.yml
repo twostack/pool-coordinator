@@ -1,7 +1,10 @@
 # A release: pushing a tag vX.Y.Z builds, tests and smoke-tests each
-# package on its own platform, then publishes them with their checksums as
-# the GitHub release vX.Y.Z. A failure anywhere publishes nothing. A tag
-# with a pre-release part (v0.1.0-rc.1) makes a pre-release.
+# package on its own platform, then attaches them with their checksums to a
+# draft GitHub release vX.Y.Z. A failure anywhere attaches nothing. On a Mac
+# that holds the Developer ID certificate, the macOS tarball then becomes a
+# signed, notarized and stapled disk image, and the draft is published:
+#   NOTARY_PROFILE=<profile> scripts/sign-macos-release.sh vX.Y.Z
+# A tag with a pre-release part (v0.1.0-rc.1) makes a pre-release.
 name: release
 
 on:
@@ -158,11 +161,13 @@ jobs:
           done
           sha256sum -- "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
-      - name: Release
+      # a draft until scripts/sign-macos-release.sh has put the signed,
+      # notarized and stapled disk image in place of the macOS tarball
+      - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           pre=""
           case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft \
             --title "pool-coordinator ${GITHUB_REF_NAME#v}" --generate-notes $pre

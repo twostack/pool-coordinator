@@ -8,10 +8,10 @@ What a release of the coordinator is and what an installed copy guarantees, so a
 A tag `vX.Y.Z` on the repository SHALL produce a GitHub release named for it, carrying exactly:
 - `pool-coordinator_X.Y.Z_amd64.deb`
 - `pool-coordinator_X.Y.Z_arm64.deb`
-- `pool-coordinator-X.Y.Z-macos-arm64.tar.gz`
+- `pool-coordinator-X.Y.Z-macos-arm64.dmg`
 - `SHA256SUMS`, listing each artifact's SHA-256
 
-The version in `pubspec.yaml` SHALL equal the tag's, or nothing SHALL be published. An artifact SHALL be attached only after it has been built on its own platform and has passed its smoke test. A failure in any build or test SHALL publish no release.
+The version in `pubspec.yaml` SHALL equal the tag's, or nothing SHALL be published. An artifact SHALL be attached only after it has been built on its own platform and has passed its smoke test. A failure in any build or test SHALL publish no release. The release SHALL stay a draft until its macOS disk image has been signed, notarized and stapled.
 
 #### Scenario: A tag whose version disagrees
 - **WHEN** the tag `v0.2.0` is pushed while `pubspec.yaml` says `0.1.0`
@@ -89,12 +89,16 @@ An upgrade SHALL stop the running service before replacing its files and SHALL s
 - **WHEN** version N+1 is installed while the service is stopped
 - **THEN** it is still stopped afterwards
 
-### Requirement: The macOS tarball runs where it is unpacked
-The macOS artifact SHALL unpack to one directory named for its version, holding the program, the kernels, the web site, an example configuration and an example proxy configuration. The program SHALL run from that directory, or through a link to it, on macOS 14 or later on Apple Silicon, with no other installation.
+### Requirement: The macOS disk image runs where it is copied
+The macOS artifact SHALL be a disk image holding one directory named for its version, holding the program, the kernels, the web site, an example configuration and an example proxy configuration. The program SHALL run from that directory, or through a link to it, on macOS 14 or later on Apple Silicon, with no other installation. The program and the kernel library SHALL be signed with the publisher's Developer ID under the hardened runtime, and the image signed, notarized by Apple and stapled, so Gatekeeper runs a copy downloaded through a browser without the operator removing its quarantine, and without needing to look the ticket up online.
 
 #### Scenario: Unpack and check
-- **WHEN** the tarball is unpacked on a macOS 14 runner and `pool-coordinator-X.Y.Z/bin/pool-coordinator check` runs from another directory
+- **WHEN** the directory is copied out of the image on macOS 14 and `pool-coordinator-X.Y.Z/bin/pool-coordinator check` runs from another directory
 - **THEN** it exits 0, naming the bundled kernel library and reporting the Metal GPU path available
+
+#### Scenario: A browser download
+- **WHEN** the published image carries the quarantine attribute a browser sets, and its directory is copied out and the program run
+- **THEN** Gatekeeper accepts the program as notarized Developer ID code, and `--version` answers
 
 ### Requirement: Artifacts stay small
 Each release artifact SHALL be under 40 MB, since an operator downloads it to a server.
