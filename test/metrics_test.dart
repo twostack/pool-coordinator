@@ -235,7 +235,8 @@ void main() {
           reason: 'the library\'s stages changed; update libraryLaps and stageAfter in round_stage.dart');
       expect(stageAfter.keys.toList(), libraryLaps, reason: 'the stage table names a stage the library does not lap');
       expect(atPublish, [RoundStage.broadcast, RoundStage.broadcast, RoundStage.broadcast]);
-    });
+      // a real round is proved here, which a small CI runner takes longer than the default 30 s to do
+    }, timeout: const Timeout(Duration(minutes: 2)));
 
     test('the stage only moves forward through proving, funding and broadcast as laps accumulate', () {
       final seen = [for (int i = 0; i <= libraryLaps.length; i++) stageOf(libraryLaps.take(i))];
