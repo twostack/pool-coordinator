@@ -1,0 +1,20 @@
+#!/bin/bash
+set -e
+
+# Removal keeps the data and configuration; purge deletes them, the wallet
+# and the secrets included.
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/pool-coordinator /var/log/pool-coordinator /etc/pool-coordinator
+    if id -u pool-coordinator >/dev/null 2>&1; then
+        userdel pool-coordinator >/dev/null 2>&1 || true
+    fi
+    if getent group pool-coordinator >/dev/null 2>&1; then
+        groupdel pool-coordinator >/dev/null 2>&1 || true
+    fi
+    echo "pool-coordinator data, configuration and user purged"
+fi
+
+if command -v supervisorctl >/dev/null 2>&1; then
+    supervisorctl reread >/dev/null 2>&1 || true
+    supervisorctl update >/dev/null 2>&1 || true
+fi

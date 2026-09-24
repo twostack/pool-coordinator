@@ -4,7 +4,13 @@ The TSL1_SP shielded pool coordinator server. It runs a pool from a `ShieldedCoo
 
 The library, the protocol and the pool's specs live in `../tstokenlib`; this repo holds the server, its wallet, its chain access and its configuration. Changes are planned under `openspec/`; the running design record is `docs/DESIGN.md`.
 
-## Running
+## Releases
+
+Each tag `vX.Y.Z` publishes a GitHub release of this repository with a Debian package for amd64 and for arm64 (`pool-coordinator_X.Y.Z_<arch>.deb`, Ubuntu 22.04 and later, Debian 12), a tarball for Apple Silicon Macs (`pool-coordinator-X.Y.Z-macos-arm64.tar.gz`, macOS 14 and later), and `SHA256SUMS`. They need no Dart, Rust or Node: the kernels and the web site are inside. `pool-coordinator check` says what an install can do. Install instructions follow in a later change; the packaging is `deploy/debian/`, `scripts/` and `.github/workflows/release.yml`, and `./build-deb.sh` and `scripts/package-macos.sh` build the same packages locally.
+
+## Running from source
+
+The dependencies come from pub.dev. To build against sibling checkouts of tstokenlib and ricochet-dart-client instead, copy `pubspec_overrides.yaml.example` to `pubspec_overrides.yaml` (gitignored). With it in place `dart pub get` writes the local paths into `pubspec.lock`; commit a lock resolved without it, since the release build refuses anything else (`dart pub get --enforce-lockfile`).
 
 ```
 dart pub get
@@ -15,7 +21,7 @@ POOL_WALLET_PASSPHRASE=... POOL_RPC_PASSWORD=... dart run bin/pool_coordinator.d
 
 `create` generates the owner key and the ricochet identity, writes the wallet and identity files, waits for the printed address to be funded, issues the pool, writes the genesis txids into the configuration and puts the descriptor on the feed. `run` opens or recovers the pool and serves it until SIGINT or SIGTERM. The status is in the configured status file; the log goes to stderr.
 
-The library's native kernels are needed at run time (the note encryption and the provers use them): build `../tstokenlib/native/stark_kernels` and set `STARK_KERNELS_LIB` to the library file. With tstokenlib checked out beside this repo a `native` symlink to `../tstokenlib/native` also works, which is what the tests here use; it is machine-local and not committed. `STARK_KERNELS_GPU=1` proves on the GPU.
+The library's native kernels are needed at run time (the note encryption and the provers use them): build tstokenlib's `native/stark_kernels` (in the sibling checkout, or in the pub cache, where the crate ships as source) and set `STARK_KERNELS_LIB` to the library file. With tstokenlib checked out beside this repo a `native` symlink to `../tstokenlib/native` also works, which is what the tests here use; it is machine-local and not committed. `STARK_KERNELS_GPU=1` proves on the GPU.
 
 Wallets are also answered beyond submission replies: catch-up requests (the head, the frontier, block roots, a mined round by number) at the last mined round, and each submitter is sent its round when it is mined. Protocol version 3, from tstokenlib; the status file counts them under `catchUp`.
 
@@ -68,6 +74,7 @@ POOL_LOCALNET=1 dart test test/chain_node_test.dart test/localnet_e2e_test.dart 
 cd web && npm run lint && npm test     # the site's elements and feed against a fake API
 cd web && npx playwright install chromium && npm run test:browser   # the 360 px layout, keyboard, themes
 tool/dashboard_e2e.sh                  # the page through Caddy against the coordinator on localnet
+tool/deb_e2e.sh <deb> <newer deb>      # the .deb in Ubuntu 22.04: install, a pool on localnet, upgrade, purge
 ```
 
 The ricochet tests start `../go-ricochet/ricochet` themselves (`cd ../go-ricochet && GOTOOLCHAIN=go1.25.7 go build -o ricochet ./cmd/ricochet`) against a database they create on localnet's PostgreSQL (`POOL_RICOCHET_PG` overrides the admin URL) and skip with the build command when the binary is missing.

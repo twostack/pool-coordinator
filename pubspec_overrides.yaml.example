@@ -1,0 +1,8 @@
+# Copy to pubspec_overrides.yaml (gitignored) to build against sibling
+# checkouts instead of the tstokenlib and ricochet releases pubspec.yaml
+# names. Dart applies it on top of pubspec.yaml without flags.
+dependency_overrides:
+  tstokenlib:
+    path: ../tstokenlib
+  ricochet:
+    path: ../ricochet-dart-client

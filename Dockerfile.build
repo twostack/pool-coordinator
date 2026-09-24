@@ -1,0 +1,57 @@
+# Build environment for the pool-coordinator Debian package.
+#
+# Ubuntu 22.04 is the build baseline, so its glibc (2.35) is the oldest the
+# package runs on. Every toolchain is pinned by version and checksum, the
+# same ones the release workflow uses.
+FROM ubuntu:22.04
+
+ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip xz-utils git python3 build-essential \
+        dpkg-dev fakeroot sudo rsync libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dart 3.11.5
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) a=x64;   sum=57f3ab5ac24883060b1ff12bcdac472ed76563ec7364e88f8a6d41e4f0db075f ;; \
+      arm64) a=arm64; sum=50e9aba58f8717943854778a73074e63a80c42054355d35e2732a0cc0824a2fb ;; \
+      *) echo "unsupported arch $TARGETARCH"; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/dart.zip "https://storage.googleapis.com/dart-archive/channels/stable/release/3.11.5/sdk/dartsdk-linux-$a-release.zip"; \
+    echo "$sum  /tmp/dart.zip" | sha256sum -c -; \
+    unzip -q /tmp/dart.zip -d /usr/lib; rm /tmp/dart.zip
+
+# Node 20.18.0, for the web site
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) a=x64;   sum=4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a ;; \
+      arm64) a=arm64; sum=a9ce85675ba33f00527f6234d90000946c0936fb4fca605f1891bb5f4fe6fb0a ;; \
+    esac; \
+    curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-$a.tar.xz"; \
+    echo "$sum  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; rm /tmp/node.tar.xz
+
+RUN useradd -m -u 1000 -s /bin/bash builder \
+    && echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+USER builder
+
+# Rust 1.84.0 through rustup 1.27.1, which checks the toolchain it fetches
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) t=x86_64-unknown-linux-gnu;  sum=6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d ;; \
+      arm64) t=aarch64-unknown-linux-gnu; sum=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2 ;; \
+    esac; \
+    curl -fsSLo /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/1.27.1/$t/rustup-init"; \
+    echo "$sum  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.84.0; \
+    rm /tmp/rustup-init
+
+ENV PATH="/usr/lib/dart-sdk/bin:/home/builder/.cargo/bin:${PATH}"
+RUN dart --version && cargo --version && node --version && dpkg-deb --version
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

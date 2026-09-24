@@ -176,31 +176,46 @@ api:
     }
   });
 
-  test('the example configuration parses and holds no key, seed, passphrase or password', () {
-    final text = File('config.example.yaml').readAsStringSync();
-    final c = PoolConfig.parse(text);
-    expect(c.genesis, isNull);
-    expect(c.chain.kind, ChainKind.node);
-    // every field whose name suggests a secret only says where it is found
-    final doc = loadYaml(text) as YamlMap;
-    final secretish = RegExp(r'passphrase|password|key|seed|secret', caseSensitive: false);
-    void walk(String prefix, YamlMap m) {
-      for (final e in m.entries) {
-        final k = '$prefix${e.key}';
-        if (secretish.hasMatch('${e.key}')) {
-          expect('${e.key}', endsWith('_file'), reason: '$k names a secret value rather than where it is found');
+  for (final example in const ['config.example.yaml', 'deploy/debian/config.example.yaml']) {
+    test('$example parses and holds no key, seed, passphrase or password', () {
+      final text = File(example).readAsStringSync();
+      final c = PoolConfig.parse(text);
+      expect(c.genesis, isNull);
+      expect(c.chain.kind, ChainKind.node);
+      // every field whose name suggests a secret only says where it is found
+      final doc = loadYaml(text) as YamlMap;
+      final secretish = RegExp(r'passphrase|password|key|seed|secret', caseSensitive: false);
+      void walk(String prefix, YamlMap m) {
+        for (final e in m.entries) {
+          final k = '$prefix${e.key}';
+          if (secretish.hasMatch('${e.key}')) {
+            expect('${e.key}', endsWith('_file'), reason: '$k names a secret value rather than where it is found');
+          }
+          if (e.value is YamlMap) walk('$k.', e.value as YamlMap);
         }
-        if (e.value is YamlMap) walk('$k.', e.value as YamlMap);
       }
-    }
 
-    walk('', doc);
-    // and the comments name only the places, never a value
-    for (final line in text.split('\n')) {
-      if (!secretish.hasMatch(line)) continue;
-      expect(line, isNot(matches(RegExp(r'(passphrase|password|key|seed|secret)\s*[:=]\s*[^\s#]', caseSensitive: false))),
-          reason: 'a secret with a value: "$line"');
-    }
+      walk('', doc);
+      // and the comments name only the places, never a value
+      for (final line in text.split('\n')) {
+        if (!secretish.hasMatch(line)) continue;
+        expect(line, isNot(matches(RegExp(r'(passphrase|password|key|seed|secret)\s*[:=]\s*[^\s#]', caseSensitive: false))),
+            reason: 'a secret with a value: "$line"');
+      }
+    });
+  }
+
+  // The package copies this to /etc/pool-coordinator/config.yaml and runs
+  // the service in /var/lib/pool-coordinator, the one directory it owns.
+  test('the packaged example keeps everything the pool writes in /var/lib/pool-coordinator, with the API on', () {
+    final c = PoolConfig.parse(File('deploy/debian/config.example.yaml').readAsStringSync(), baseDir: '/etc/pool-coordinator');
+    const data = '/var/lib/pool-coordinator/';
+    expect(c.ricochet.identityFile, startsWith(data));
+    expect(c.wallet.file, startsWith(data));
+    expect(c.store.directory, startsWith(data));
+    expect(c.server.statusFile, startsWith(data));
+    expect(c.api?.metricsFile, startsWith(data));
+    expect(c.api?.bind.address, '127.0.0.1');
   });
 }
 

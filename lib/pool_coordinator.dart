@@ -22,3 +22,4 @@ export 'src/ricochet_transport.dart';
 export 'src/create.dart';
 export 'src/server.dart';
 export 'src/status.dart';
+export 'src/install_check.dart';

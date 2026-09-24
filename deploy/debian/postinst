@@ -1,0 +1,72 @@
+#!/bin/bash
+set -e
+
+# The service's own user. No login shell; its home is the data directory.
+if ! id -u pool-coordinator >/dev/null 2>&1; then
+    useradd --system --user-group --shell /usr/sbin/nologin \
+        --home-dir /var/lib/pool-coordinator --comment "TSL1_SP pool coordinator" pool-coordinator
+    echo "Created the pool-coordinator system user"
+fi
+
+# The pool's wallet, identity, store, status and history, and its logs.
+mkdir -p /var/lib/pool-coordinator /var/log/pool-coordinator
+chown pool-coordinator:pool-coordinator /var/lib/pool-coordinator /var/log/pool-coordinator
+chmod 750 /var/lib/pool-coordinator /var/log/pool-coordinator
+
+# `create` writes the genesis into config.yaml by writing config.yaml.tmp and
+# renaming it, so the service needs to write this directory. The sticky bit
+# limits that to its own files: it can replace config.yaml, but cannot rename
+# over or delete the root-owned env file.
+mkdir -p /etc/pool-coordinator
+chown root:pool-coordinator /etc/pool-coordinator
+chmod 1770 /etc/pool-coordinator
+
+# config.yaml is not a conffile: `create` edits it, and dpkg would ask about
+# it on every upgrade. It is made from the example once and never replaced.
+if [ ! -f /etc/pool-coordinator/config.yaml ]; then
+    cp /opt/pool-coordinator/share/config.example.yaml /etc/pool-coordinator/config.yaml
+    chown pool-coordinator:pool-coordinator /etc/pool-coordinator/config.yaml
+    chmod 640 /etc/pool-coordinator/config.yaml
+fi
+
+# The env file holds the wallet passphrase and the RPC password. It exists
+# with safe permissions before anyone edits it, and the permissions are
+# tightened again on every upgrade in case they were loosened.
+if [ ! -f /etc/pool-coordinator/env ]; then
+    cp /opt/pool-coordinator/share/env.example /etc/pool-coordinator/env
+fi
+chown root:pool-coordinator /etc/pool-coordinator/env
+chmod 640 /etc/pool-coordinator/env
+
+# Tell a running supervisor about the program. A first install is left
+# stopped (autostart=false): there is no pool until `create` has run.
+supervisorctl reread >/dev/null 2>&1 || true
+supervisorctl update >/dev/null 2>&1 || true
+
+# Start the new version only if prerm found the old one running.
+MARKER=/var/lib/pool-coordinator/.restart-after-upgrade
+if [ -f "$MARKER" ]; then
+    rm -f "$MARKER"
+    if supervisorctl start pool-coordinator >/dev/null 2>&1; then
+        echo "pool-coordinator restarted on the new version"
+    else
+        echo "WARNING: pool-coordinator was running before the upgrade and did not restart;"
+        echo "         see /var/log/pool-coordinator/stderr.log"
+    fi
+fi
+
+if [ -z "$2" ]; then
+    cat <<'MSG'
+
+pool-coordinator is installed and stopped. To run a pool:
+  1. Edit /etc/pool-coordinator/config.yaml: the chain, the ricochet server.
+  2. Set the secrets in /etc/pool-coordinator/env.
+  3. Create the pool as the service user, and fund the address it prints:
+       sudo -u pool-coordinator /opt/pool-coordinator/run.sh create
+  4. Start it:  sudo supervisorctl start pool-coordinator
+
+Back up /var/lib/pool-coordinator/wallet.enc and the passphrase: they hold
+the pool's owner key and coins, and `apt purge` deletes the wallet.
+Check what this install can do:  pool-coordinator check
+MSG
+fi

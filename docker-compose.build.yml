@@ -1,0 +1,30 @@
+services:
+  # Builds the .deb in Ubuntu 22.04 from a Mac (see build-deb.sh). ARCH
+  # picks the platform: amd64 by default, arm64 natively on Apple Silicon.
+  builder:
+    platform: linux/${ARCH:-amd64}
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+    image: pool-coordinator-builder:${ARCH:-amd64}
+    volumes:
+      # Only this repository, read-only: every dependency comes from pub.dev.
+      - .:/src:ro
+      - ./build/dist:/out:rw
+      - pub-cache:/home/builder/.pub-cache
+      - cargo-registry:/home/builder/.cargo/registry
+      - npm-cache:/home/builder/.npm
+    working_dir: /src
+    environment:
+      - VERSION
+      - ARCH=${ARCH:-amd64}
+      - HOST_USER_ID
+      - HOST_GROUP_ID
+
+volumes:
+  pub-cache:
+    name: pool-coordinator-pub-cache
+  cargo-registry:
+    name: pool-coordinator-cargo-registry
+  npm-cache:
+    name: pool-coordinator-npm-cache

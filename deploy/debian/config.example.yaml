@@ -1,0 +1,95 @@
+# pool-coordinator configuration, as installed by the Debian package.
+#
+# Fill in the chain and the ricochet server, set the secrets in
+# /etc/pool-coordinator/env, then create the pool as the service user:
+#   sudo -u pool-coordinator /opt/pool-coordinator/run.sh create
+# It generates the owner key and the ricochet identity, writes the wallet and
+# identity files under /var/lib/pool-coordinator, and fills in `genesis`
+# below. Upgrades never replace this file.
+#
+# Nothing secret goes in this file. The wallet passphrase is read from
+# POOL_WALLET_PASSPHRASE and a node's RPC password from POOL_RPC_PASSWORD,
+# both set in /etc/pool-coordinator/env.
+
+# The aggregation plan the pool runs: `test` (4 transfers, fits ARC) or
+# `production` (256 transfers; publishes through a node only).
+plan: test
+
+# Which address format the pool uses: `test` for regtest and testnet, `main`.
+network: test
+
+chain:
+  # `node` publishes and reads through a node's RPC (localnet); `testnet`
+  # broadcasts through ARC and reads through WhatsOnChain.
+  kind: node
+  rpc_url: http://localhost:18332
+  rpc_user: bitcoin
+  # For kind testnet:
+  # arc_url: https://arc-test.taal.com/v1
+  # woc_url: https://api.whatsonchain.com/v1/bsv/test
+  # ARC refuses to parse a scriptSig over this many bytes (measured on
+  # localnet); a transaction over it is refused before it is sent.
+  arc_scriptsig_limit: 1636802
+  timeout_seconds: 30
+  retries: 3
+
+ricochet:
+  # The ricochet server's multiaddr, with its peer id.
+  server: /ip4/127.0.0.1/udp/55223/udx/p2p/REPLACE_WITH_SERVER_PEER_ID
+  # The coordinator's Ed25519 identity seed, written by `create`.
+  identity_file: /var/lib/pool-coordinator/identity.seed
+  send_retries: 3
+
+wallet:
+  # The owner key and the coins, encrypted under the passphrase.
+  file: /var/lib/pool-coordinator/wallet.enc
+  # Log a warning when the wallet can pay for fewer rounds than this.
+  warn_rounds_left: 5
+
+store:
+  directory: /var/lib/pool-coordinator/store
+  keep_snapshots: 10
+
+# Written by `create`; the txids of the pool's issuance, witness 0 and Y_0.
+# genesis:
+#   issuance: <txid>
+#   witness0: <txid>
+#   slot0: <txid>
+
+round:
+  # Satoshis per kB each transaction pays, and the least any pays.
+  fee_rate: 1
+  fee_floor: 135
+  # How long a pending round waits after its first transfer before closing short.
+  deadline_seconds: 600
+  # Padding transfers kept proved ahead.
+  padding_stock: 3
+  # Blocks a deposit's refund must sit beyond the chain height.
+  deposit_margin: 100
+
+server:
+  # How often the submissions folder is drained, in milliseconds.
+  poll_ms: 2000
+  status_file: /var/lib/pool-coordinator/status.json
+  # How often the chain is asked whether a transaction is mined.
+  mined_poll_ms: 2000
+  # How long a funding transaction is waited for before the round fails.
+  funding_timeout_seconds: 3600
+
+# The read-only API a public landing page reads: the pool's rounds, its
+# statistics and the live state of the round being built. On in this
+# example, since the package ships the site; it binds to loopback only and
+# is reached through a proxy on this host. The site is
+# /opt/pool-coordinator/web and an example Caddyfile is
+# /opt/pool-coordinator/share/Caddyfile. It serves nothing about a single
+# submission.
+api:
+  enabled: true
+  bind: 127.0.0.1
+  port: 8787
+  # The pool's history of rounds, rebuilt from the store if deleted.
+  metrics_file: /var/lib/pool-coordinator/metrics.sqlite
+  # Every time served is rounded to this, and the live state changes at
+  # most this often; at least 10.
+  publish_interval_seconds: 30
+  max_subscribers: 200

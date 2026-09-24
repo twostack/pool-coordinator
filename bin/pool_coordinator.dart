@@ -5,15 +5,18 @@ import 'package:args/args.dart';
 import 'package:logging/logging.dart';
 import 'package:pool_coordinator/pool_coordinator.dart';
 
-/// The coordinator's two commands: `create` issues a pool from the wallet's
-/// coins and writes its descriptor, `run` runs it.
+/// The coordinator's commands: `create` issues a pool from the wallet's
+/// coins and writes its descriptor, `run` runs it, and `check` reports what
+/// an installed copy can do without needing a configuration.
 Future<void> main(List<String> arguments) async {
   final parser = ArgParser()
     ..addOption('config', abbr: 'c', help: 'The configuration file.', defaultsTo: 'config.yaml')
     ..addFlag('verbose', abbr: 'v', negatable: false, help: 'Log at fine level.')
-    ..addFlag('help', abbr: 'h', negatable: false);
+    ..addFlag('help', abbr: 'h', negatable: false)
+    ..addFlag('version', negatable: false, help: 'Print the version.');
   parser.addCommand('create');
   parser.addCommand('run');
+  parser.addCommand('check');
   final ArgResults args;
   try {
     args = parser.parse(arguments);
@@ -23,6 +26,15 @@ Future<void> main(List<String> arguments) async {
     exit(64);
   }
   final command = args.command?.name;
+  if (args['version'] as bool) {
+    stdout.writeln('pool-coordinator $poolVersion');
+    exit(0);
+  }
+  if (command == 'check') {
+    final (:ok, :lines) = installCheck();
+    lines.forEach(stdout.writeln);
+    exit(ok ? 0 : 69);
+  }
   if (args['help'] as bool || command == null) {
     _usage(parser);
     exit(command == null ? 64 : 0);
@@ -110,6 +122,6 @@ Future<void> _run(PoolConfig config, Secrets secrets, ChainAccess chain) async {
 }
 
 void _usage(ArgParser parser) {
-  stderr.writeln('usage: pool_coordinator [--config <file>] <create|run>');
+  stderr.writeln('usage: pool-coordinator [--config <file>] <create|run|check>');
   stderr.writeln(parser.usage);
 }

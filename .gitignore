@@ -1,6 +1,6 @@
 .dart_tool/
 build/
-pubspec.lock
+pubspec_overrides.yaml
 tool/scratch/
 .claude/settings.local.json
 # A machine-local symlink to ../tstokenlib/native; STARK_KERNELS_LIB is the

@@ -1,0 +1,168 @@
+# A release: pushing a tag vX.Y.Z builds, tests and smoke-tests each
+# package on its own platform, then publishes them with their checksums as
+# the GitHub release vX.Y.Z. A failure anywhere publishes nothing. A tag
+# with a pre-release part (v0.1.0-rc.1) makes a pre-release.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  DART_VERSION: 3.11.5
+  RUST_VERSION: 1.84.0
+  NODE_VERSION: 20.18.0
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: The tag is pubspec.yaml's version
+        run: scripts/check-version.sh "$GITHUB_REF_NAME"
+
+  web:
+    needs: check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Lint, test and build the site
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
+  build:
+    needs: web
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {os: ubuntu-22.04, package: deb, arch: amd64}
+          - {os: ubuntu-22.04-arm, package: deb, arch: arm64}
+          - {os: macos-14, package: macos, arch: arm64}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: ${{ env.DART_VERSION }}
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Dependencies, as the committed lockfile pins them
+        run: dart pub get --enforce-lockfile
+
+      # before the suite, which needs them (ML-KEM is native only)
+      - name: The native kernels, from the pinned tstokenlib
+        run: |
+          . scripts/common.sh
+          if [ "${{ matrix.package }}" = macos ]; then lib=$(build_kernels --features metal); else lib=$(build_kernels); fi
+          echo "STARK_KERNELS_LIB=$PWD/$lib" >> "$GITHUB_ENV"
+          echo "TSTOKENLIB_ROOT=$(tstokenlib_root)" >> "$GITHUB_ENV"
+
+      - name: Analyze
+        run: dart analyze lib bin test
+      - name: Test
+        run: dart test
+
+      # the kernels' proofs are the Dart kernels', byte for byte, on this platform
+      - name: tstokenlib's native byte-identity test against the built kernels
+        run: |
+          cp -R "$TSTOKENLIB_ROOT" "$RUNNER_TEMP/tstokenlib"
+          cd "$RUNNER_TEMP/tstokenlib"
+          dart pub get
+          dart test test/stark_kernels_test.dart
+
+      - name: Package
+        env:
+          WEB_DIST: web/dist
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          if [ "${{ matrix.package }}" = deb ]; then scripts/package-deb.sh; else scripts/package-macos.sh; fi
+
+      - name: Smoke test the Debian package
+        if: matrix.package == 'deb'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ./build/dist/pool-coordinator_*.deb
+          cd /
+          env -u STARK_KERNELS_LIB pool-coordinator check | tee /tmp/check.txt
+          grep -q 'kernels: /opt/pool-coordinator/lib/libstark_kernels.so' /tmp/check.txt
+          grep -q 'sqlite: libsqlite3.so.0' /tmp/check.txt
+          test "$(pool-coordinator --version)" = "pool-coordinator ${GITHUB_REF_NAME#v}"
+
+      - name: Smoke test the macOS tarball
+        if: matrix.package == 'macos'
+        run: |
+          mkdir "$RUNNER_TEMP/unpack"
+          tar -xzf build/dist/pool-coordinator-*-macos-arm64.tar.gz -C "$RUNNER_TEMP/unpack"
+          exe=$(echo "$RUNNER_TEMP"/unpack/pool-coordinator-*/bin/pool-coordinator)
+          cd /
+          env -u STARK_KERNELS_LIB "$exe" check | tee /tmp/check.txt
+          grep -q '/lib/libstark_kernels.dylib' /tmp/check.txt
+          test "$("$exe" --version)" = "pool-coordinator ${GITHUB_REF_NAME#v}"
+          # a hosted runner is a VM whose Metal device may be missing;
+          # the Metal path is checked on a Mac before tagging
+          grep -q 'metal: available' /tmp/check.txt || echo "::warning::Metal not available on this runner: $(grep metal: /tmp/check.txt)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-${{ matrix.package }}-${{ matrix.arch }}
+          path: build/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums, and every artifact under 40 MB
+        working-directory: dist
+        run: |
+          ls -l
+          files=(*)
+          test "${#files[@]}" -eq 3
+          for f in "${files[@]}"; do
+            size=$(stat -c %s "$f")
+            if [ "$size" -ge $((40 * 1024 * 1024)) ]; then echo "::error::$f is $size bytes, over 40 MB"; exit 1; fi
+          done
+          sha256sum -- "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "pool-coordinator ${GITHUB_REF_NAME#v}" --generate-notes $pre

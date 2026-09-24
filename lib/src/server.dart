@@ -12,6 +12,7 @@ import 'chain_access.dart';
 import 'api/api_host.dart';
 import 'api/pool_api.dart';
 import 'config.dart';
+import 'install_check.dart' show kernelsMissing;
 import 'metrics/history_rebuild.dart';
 import 'metrics/metrics_history.dart';
 import 'metrics/metrics_recorder.dart';
@@ -150,8 +151,7 @@ class PoolServer {
     }
 
     if (StarkKernels.tryLoad() == null) {
-      throw StartRefusal('the native kernels (${StarkKernels.fileName}) were not found; set ${StarkKernels.envVar} '
-          'or build native/stark_kernels beside the process');
+      throw StartRefusal(kernelsMissing());
     }
     final genesis = config.genesis;
     if (genesis == null) throw StartRefusal('the configuration names no genesis; run `create` first');

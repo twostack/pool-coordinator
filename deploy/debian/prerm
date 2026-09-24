@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+# Stop the service before its files change. On an upgrade, remember that it
+# was running so postinst can start the new version: a stopped supervisor
+# program stays stopped, so without this an upgrade would leave it down.
+MARKER=/var/lib/pool-coordinator/.restart-after-upgrade
+if command -v supervisorctl >/dev/null 2>&1; then
+    if [ "$1" = "upgrade" ] && supervisorctl status pool-coordinator 2>/dev/null | grep -q RUNNING; then
+        touch "$MARKER"
+    fi
+    supervisorctl stop pool-coordinator >/dev/null 2>&1 || true
+fi

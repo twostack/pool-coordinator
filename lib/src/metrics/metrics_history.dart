@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart';
 
+import 'sqlite_library.dart';
+
 /// One round as the history holds it. Everything here is either on the
 /// chain or the feed already (the txids, the real transfer count, the
 /// header's balance, the mined height), or a measure of the coordinator's
@@ -150,6 +152,7 @@ class MetricsHistory {
   /// Opens the history at [path], or starts one, moving aside a file that
   /// is not a history of this version.
   static MetricsHistory open(String path) {
+    useRuntimeSqlite();
     String? aside;
     var db = sqlite3.open(path);
     if (!_usable(db)) {
@@ -192,6 +195,7 @@ class MetricsHistory {
   /// or creates anything: that is the recorder's to do.
   static MetricsHistory attach(String path) {
     if (!File(path).existsSync()) throw StateError('no pool history at $path');
+    useRuntimeSqlite();
     final db = sqlite3.open(path);
     if (db.userVersion != schemaVersion) {
       db.dispose();

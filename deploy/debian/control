@@ -1,0 +1,17 @@
+Package: pool-coordinator
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @ARCH@
+Depends: supervisor, libsqlite3-0, ca-certificates
+Suggests: caddy
+Maintainer: Stephan M. February <https://github.com/twostack/pool-coordinator/issues>
+Homepage: https://github.com/twostack/pool-coordinator
+Description: TSL1_SP shielded pool coordinator for BSV
+ Runs one TSL1_SP shielded pool: takes wallets' transfers over a ricochet
+ inbox, proves and publishes the pool's rounds on BSV, funds them from its
+ own wallet, and answers wallets catching up. Optionally serves a read-only
+ API for the pool's public page, behind a proxy on the same host.
+ .
+ Installs as a supervisor program running as the pool-coordinator user.
+ It is left stopped until a pool has been created.
