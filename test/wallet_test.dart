@@ -59,7 +59,8 @@ void main() {
       }
       expect(() => WalletFile.create(path, 'again', contents), throwsA(isA<WalletFileError>().having((e) => e.reason, 'reason', contains('already exists'))));
       if (!Platform.isWindows) {
-        final mode = (await Process.run('stat', ['-f', '%Lp', path])).stdout.toString().trim();
+        // from Dart rather than stat(1), whose flags differ between macOS and Linux
+        final mode = (File(path).statSync().mode & 0x1ff).toRadixString(8);
         expect(mode, '600', reason: 'owner-only');
       }
     });
