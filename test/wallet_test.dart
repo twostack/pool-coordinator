@@ -410,6 +410,27 @@ void main() {
       expect(chain.broadcasts, hasLength(1));
     });
 
+    test('an output the round spent is not offered again, though the chain\'s indexer still lists it unspent', () async {
+      final (w, chain) = await wallet(amounts: [40000, 25000, 15000, 12000]);
+      kinds(w, roundOrder);
+      final y = (await w.output(BigInt.from(416)))!;
+      final wt = (await w.output(BigInt.from(648)))!;
+      final r = (await w.output(BigInt.from(192)))!;
+      Transaction spending(FundingOutput f) => Transaction()
+        ..addInput(TransactionInput(f.tx.id, f.vout, TransactionInput.MAX_SEQ_NUMBER))
+        ..addOutput(TransactionOutput(BigInt.one, SVScript()));
+      final yTx = spending(y), wTx = spending(wt), rTx = spending(r);
+      // the round is published, but the indexer has not seen the spends:
+      // the fake chain is not told of them
+      await w.reconcile(roundTxs: [yTx, rTx, wTx]);
+      expect(w.contents.coins.where((c) => c.returned), isEmpty, reason: 'nothing the round spent comes back');
+      expect(w.contents.offered, isEmpty);
+      // and the next round's Y is funded afresh, not from a spent output
+      final next = (await w.output(BigInt.from(416)))!;
+      expect([y.tx.id, wt.tx.id].contains(next.tx.id), isFalse);
+      expect(w.built, hasLength(3));
+    });
+
     test('a refused funding transaction leaves the coin ready and fails with the chain\'s reason', () async {
       final (w, chain) = await wallet();
       chain.refuse = (_) => 'mempool full';

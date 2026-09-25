@@ -285,9 +285,18 @@ class FileWallet implements CoordinatorWallet {
     final found = {for (final u in await chain.unspentOf(address)) u.outpoint: u};
     final before = contents.balanceAtReconcile;
 
-    // offered outputs the chain still shows unspent come back
+    // offered outputs the chain still shows unspent come back; one the
+    // round's own transactions spend is spent whatever the chain says, since
+    // an indexer can lag the round's broadcast by seconds (WhatsOnChain on
+    // testnet, 2026-09-25) and an output offered again after that would be
+    // spent twice
+    final spentByRound = {
+      for (final t in roundTxs)
+        for (final i in t.inputs) '${i.prevTxnId}:${i.prevTxnOutputIndex}'
+    };
     for (final c in [...contents.offered]) {
       contents.offered.remove(c);
+      if (spentByRound.contains(c.outpoint)) continue;
       if (found.containsKey(c.outpoint) || await chain.unspent(c.txid, c.vout)) {
         contents.coins.add(WalletCoin(c.tx, c.vout, returned: true, height: c.height));
         log.info('offered output ${c.outpoint} was not spent; it will be offered again');
