@@ -148,9 +148,17 @@ class FileWallet implements CoordinatorWallet {
     await beforeRequest?.call();
 
     // an output offered before and returned unspent is offered again,
-    // mined or not, rather than building a transaction for what exists
-    for (final c in contents.coins.where((c) => c.returned)) {
+    // mined or not, rather than building a transaction for what exists;
+    // asked about once more first, since offering a spent one fails the
+    // round after it is stored
+    for (final c in contents.coins.where((c) => c.returned).toList()) {
       if (c.satoshis >= minValue) {
+        if (!await chain.unspent(c.txid, c.vout)) {
+          contents.coins.remove(c);
+          await file.write(contents);
+          log.warning('returned output ${c.outpoint} is spent on the chain; dropped rather than offered again');
+          continue;
+        }
         contents.coins.remove(c);
         contents.offered.add(c);
         await file.write(contents);
@@ -302,6 +310,11 @@ class FileWallet implements CoordinatorWallet {
         log.info('offered output ${c.outpoint} was not spent; it will be offered again');
       }
     }
+    // heights first, so a coin mined since the last reconcile is judged as
+    // mined below: one wrongly returned before 0.1.4 is otherwise kept
+    // for a reconcile more, and offered in between
+    await _refreshHeights(found: found);
+
     // mined coins the chain no longer shows are gone; a pending one is
     // kept, since a dropped parent is broadcast again with its round
     for (final c in [...contents.coins]) {
