@@ -54,6 +54,12 @@ class WalletContents {
   /// Splits written before their broadcast and kept until they are mined,
   /// so one a crash left unbroadcast is broadcast at the next start.
   final List<Transaction> splits;
+
+  /// Outpoints the wallet or its rounds spent, kept until the chain's
+  /// listing of the address stops showing them: an indexer can list an
+  /// output as unspent for a while after its spend is broadcast, and the
+  /// wallet must not take it back in meanwhile.
+  final Set<String> spent;
   BigInt? lastRoundCost;
   BigInt? balanceAtReconcile;
 
@@ -71,13 +77,15 @@ class WalletContents {
     List<WalletCoin>? coins,
     List<WalletCoin>? offered,
     List<Transaction>? splits,
+    Set<String>? spent,
     this.lastRoundCost,
     this.balanceAtReconcile,
     this.splitFeePerCoin,
     this.readFormat = formatVersion,
   })  : coins = coins ?? [],
         offered = offered ?? [],
-        splits = splits ?? [];
+        splits = splits ?? [],
+        spent = spent ?? {};
 
   static const formatVersion = 2;
 
@@ -88,6 +96,7 @@ class WalletContents {
         'coins': [for (final c in coins) c.toJson()],
         'offered': [for (final c in offered) c.toJson()],
         'splits': [for (final t in splits) t.serialize()],
+        'spent': spent.toList(),
         'lastRoundCost': lastRoundCost?.toString(),
         'balanceAtReconcile': balanceAtReconcile?.toString(),
         'splitFeePerCoin': splitFeePerCoin?.toString(),
@@ -106,6 +115,7 @@ class WalletContents {
       coins: [for (final c in j['coins'] as List) WalletCoin.fromJson(c as Map<String, dynamic>)],
       offered: [for (final c in j['offered'] as List) WalletCoin.fromJson(c as Map<String, dynamic>)],
       splits: [for (final t in (j['splits'] as List?) ?? const []) Transaction.fromHex(t as String)],
+      spent: {for (final o in (j['spent'] as List?) ?? const []) o as String},
       lastRoundCost: big('lastRoundCost'),
       balanceAtReconcile: big('balanceAtReconcile'),
       splitFeePerCoin: big('splitFeePerCoin'),

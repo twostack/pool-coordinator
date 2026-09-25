@@ -239,6 +239,7 @@ class FileWallet implements CoordinatorWallet {
     }
     built.add(tx);
     contents.coins.remove(c);
+    contents.spent.add(c.outpoint);
     if (hasChange) contents.coins.add(WalletCoin(tx, 0));
     contents.offered.add(WalletCoin(tx, vout));
     await file.write(contents);
@@ -302,6 +303,7 @@ class FileWallet implements CoordinatorWallet {
       for (final t in roundTxs)
         for (final i in t.inputs) '${i.prevTxnId}:${i.prevTxnOutputIndex}'
     };
+    contents.spent.addAll(spentByRound);
     for (final c in [...contents.offered]) {
       contents.offered.remove(c);
       if (spentByRound.contains(c.outpoint)) continue;
@@ -323,9 +325,17 @@ class FileWallet implements CoordinatorWallet {
         log.warning('coin ${c.outpoint} is no longer unspent on the chain; dropped');
       }
     }
+    // a coin the wallet or a round spent is gone, whatever the listing says
+    contents.coins.removeWhere((c) => contents.spent.contains(c.outpoint));
+
     // what the chain shows and the wallet does not know: a top-up, or a
-    // round's change
-    final known = {for (final c in contents.coins) c.outpoint, for (final c in contents.offered) c.outpoint};
+    // round's change; never an output spent by the wallet or a round,
+    // which a lagging listing can still show
+    final known = {
+      for (final c in contents.coins) c.outpoint,
+      for (final c in contents.offered) c.outpoint,
+      ...contents.spent,
+    };
     var topUps = BigInt.zero;
     for (final u in found.values) {
       if (known.contains(u.outpoint)) continue;
@@ -340,6 +350,8 @@ class FileWallet implements CoordinatorWallet {
       }
     }
     await _refreshHeights(found: found);
+    // a spent outpoint the listing no longer shows needs no remembering
+    contents.spent.removeWhere((o) => !found.containsKey(o));
 
     // the round's cost: what the balance fell by since the last reconcile,
     // which a split's fee never falls in (a split is made after the
@@ -412,6 +424,7 @@ class FileWallet implements CoordinatorWallet {
       source = WalletCoin(tx, i.prevTxnOutputIndex, height: await chain.minedHeight(tx.id));
     }
     final back = source;
+    contents.spent.remove(back.outpoint);
     if (!contents.coins.any((c) => c.outpoint == back.outpoint)) contents.coins.add(back);
   }
 
@@ -463,6 +476,7 @@ class FileWallet implements CoordinatorWallet {
 
     // recorded before the broadcast, so a crash leaves it to be resumed
     contents.coins.remove(source);
+    contents.spent.add(source.outpoint);
     contents.splits.add(tx);
     _splitSources[tx.id] = source;
     for (int v = 0; v < tx.outputs.length; v++) {

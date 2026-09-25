@@ -170,6 +170,10 @@ class FakeChain implements ChainAccess {
   /// `unspent/all` does on testnet; by default it lists mined ones only.
   bool listUnmined = false;
 
+  /// Outpoints [unspentOf] still lists though they are spent, as a lagging
+  /// indexer does for a while after the spend (testnet, 2026-09-25).
+  final stillListed = <String>{};
+
   @override
   Future<List<UnspentOutput>> unspentOf(Address address) async {
     final pkh = address.pubkeyHash160;
@@ -177,7 +181,7 @@ class FakeChain implements ChainAccess {
     for (final tx in known.values) {
       if (!listUnmined && !minedAt.containsKey(tx.id)) continue;
       for (int v = 0; v < tx.outputs.length; v++) {
-        if (spentOutpoints.contains('${tx.id}:$v')) continue;
+        if (spentOutpoints.contains('${tx.id}:$v') && !stillListed.contains('${tx.id}:$v')) continue;
         if (paysPKH(tx.outputs[v], pkh)) out.add(UnspentOutput(tx.id, v, tx.outputs[v].satoshis, height: minedAt[tx.id]));
       }
     }
