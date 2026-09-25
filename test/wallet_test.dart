@@ -465,6 +465,45 @@ void main() {
       expect(w.contents.coins.where((c) => c.returned), isEmpty);
     });
 
+    test('outputs the round spent, still listed unspent by a lagging indexer, are not taken back in, and the cost is right', () async {
+      final (w, chain) = await wallet(amounts: [40000, 25000, 15000, 12000]);
+      chain.listUnmined = true;
+      kinds(w, roundOrder);
+      await w.reconcile();
+      final before = w.balance;
+      final y = (await w.output(BigInt.from(416)))!;
+      final wt = (await w.output(BigInt.from(648)))!;
+      final r = (await w.output(BigInt.from(192)))!;
+      Transaction spending(FundingOutput f, {int change = 0}) {
+        final t = Transaction()..addInput(TransactionInput(f.tx.id, f.vout, TransactionInput.MAX_SEQ_NUMBER));
+        if (change > 0) t.addOutput(TransactionOutput(BigInt.from(change), P2PKHLockBuilder.fromAddress(addr).getScriptPubkey()));
+        t.addOutput(TransactionOutput(BigInt.one, SVScript()));
+        return t;
+      }
+      final yTx = spending(y), rTx = spending(r, change: (r.value - BigInt.from(396)).toInt()), wTx = spending(wt);
+      for (final t in [yTx, rTx, wTx]) {
+        await chain.broadcast(t);
+      }
+      // the indexer still lists every output the round and its funding spent
+      chain.stillListed.addAll([
+        for (final t in [...w.built, yTx, rTx, wTx])
+          for (final i in t.inputs) '${i.prevTxnId}:${i.prevTxnOutputIndex}'
+      ]);
+      final logs = <String>[];
+      final sub = w.log.onRecord.listen((rec) => logs.add(rec.message));
+      await w.reconcile(roundTxs: [yTx, rTx, wTx]);
+      await sub.cancel();
+      expect(logs.where((m) => m.contains('top-up')), isEmpty, reason: 'nothing spent is taken back in');
+      final held = {for (final c in w.contents.coins) c.outpoint};
+      expect(held.intersection(chain.stillListed), isEmpty);
+      expect(w.lastRoundCost, BigInt.from(416 + 648 + 396 + 2 * 135));
+      expect(w.balance, before - w.lastRoundCost!);
+      // once the indexer catches up, the wallet forgets what it remembered
+      chain.stillListed.clear();
+      await w.reconcile();
+      expect(w.contents.spent, isEmpty);
+    });
+
     test('a refused funding transaction leaves the coin ready and fails with the chain\'s reason', () async {
       final (w, chain) = await wallet();
       chain.refuse = (_) => 'mempool full';
