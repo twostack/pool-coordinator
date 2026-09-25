@@ -3,7 +3,8 @@ import { defineConfig, devices } from '@playwright/test';
 // Browser checks run against the built site served by `vite preview`, with
 // the API faked per test by request routing, so they need no coordinator.
 // The end-to-end run through the proxy sets POOL_SITE to its origin
-// instead and starts nothing here.
+// instead and starts nothing here. A second server is a host page that
+// embeds the packed elements, for the package's checks.
 const site = process.env.POOL_SITE;
 
 export default defineConfig({
@@ -15,11 +16,20 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   ...(site ? {} : {
-    webServer: {
-      command: 'npm run build && npx vite preview --host 127.0.0.1 --port 4173 --strictPort',
-      url: 'http://127.0.0.1:4173',
-      reuseExistingServer: false,
-      timeout: 120_000,
-    },
+    webServer: [
+      {
+        command: 'npm run build && npx vite preview --host 127.0.0.1 --port 4173 --strictPort',
+        url: 'http://127.0.0.1:4173',
+        reuseExistingServer: false,
+        timeout: 120_000,
+      },
+      {
+        // a host page embedding the packed `pool-elements` (e2e/host.spec.ts)
+        command: 'node scripts/host-fixture.mjs 4174',
+        url: 'http://127.0.0.1:4174',
+        reuseExistingServer: false,
+        timeout: 180_000,
+      },
+    ],
   }),
 });

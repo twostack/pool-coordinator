@@ -14,6 +14,8 @@ export class PoolStats extends LitElement {
   static override styles = css`
     :host {
       display: block;
+      font-family: var(--pool-font);
+      color: var(--pool-text);
     }
     dl {
       display: grid;

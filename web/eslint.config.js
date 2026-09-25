@@ -8,7 +8,7 @@ import tseslint from 'typescript-eslint';
 const markup = 'API data is rendered as text; building HTML from a string is not allowed on this page.';
 
 export default tseslint.config(
-  { ignores: ['dist/', 'node_modules/', 'playwright-report/', 'test-results/'] },
+  { ignores: ['dist/', 'node_modules/', 'playwright-report/', 'test-results/', 'pool-elements/dist/', '.host-fixture/'] },
   js.configs.recommended,
   ...tseslint.configs.strict,
   {

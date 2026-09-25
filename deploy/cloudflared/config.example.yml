@@ -1,0 +1,24 @@
+# cloudflared on the coordinator's host: the tunnel that lets the edge site
+# (shieldpool.net's /api/testnet route) reach the coordinator's read-only API,
+# which binds to loopback only. The host opens no web port; cloudflared
+# connects out to Cloudflare. Cloudflare Access on the hostname refuses any
+# request without the edge route's service token.
+#
+# A tunnel created in the dashboard (Zero Trust → Networks → Tunnels) and
+# installed with `cloudflared service install <token>` keeps this ingress in
+# the dashboard instead; this file is the same ingress for a locally managed
+# tunnel (`cloudflared tunnel create pool-origin`), at
+# /etc/cloudflared/config.yml.
+tunnel: pool-origin
+credentials-file: /etc/cloudflared/pool-origin.json
+
+ingress:
+  # the API, and nothing else on this host
+  - hostname: pool-origin.shieldpool.net
+    service: http://127.0.0.1:8787
+    originRequest:
+      # the event stream stays open; cloudflared must not cut it
+      disableChunkedEncoding: false
+      keepAliveTimeout: 90s
+  # every other hostname and path the tunnel is asked for
+  - service: http_status:404

@@ -1,0 +1,25 @@
+{
+  "name": "pool-elements",
+  "version": "0.0.0",
+  "description": "The BSV Shielded Pool dashboard's elements for a host page: live round, rounds, statistics and charts, fed by the coordinator's read-only API.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/types/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/lib.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tokens.css": "./dist/tokens.css"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/tokens.css"
+  ]
+}

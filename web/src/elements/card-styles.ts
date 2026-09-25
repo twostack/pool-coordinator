@@ -4,6 +4,7 @@ import { css } from 'lit';
 export const cardStyles = css`
   :host {
     display: block;
+    font-family: var(--pool-font);
     inline-size: var(--pool-card-width);
     block-size: 100%;
   }

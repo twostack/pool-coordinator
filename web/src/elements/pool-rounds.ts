@@ -47,6 +47,8 @@ export class PoolRounds extends LitElement {
   static override styles = css`
     :host {
       display: block;
+      font-family: var(--pool-font);
+      color: var(--pool-text);
       min-inline-size: 0;
     }
     .scroll {

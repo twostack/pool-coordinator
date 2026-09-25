@@ -1,0 +1,49 @@
+/* The design tokens: the elements' whole theming contract. Custom properties
+   inherit into the elements' shadow roots, so the elements style themselves
+   from these alone. A host page that embeds the elements imports this file
+   for the defaults, or sets the same properties to its own values. */
+:root {
+  color-scheme: light dark;
+  --pool-bg: #f7f7f5;
+  --pool-surface: #ffffff;
+  --pool-text: #1b1d21;
+  --pool-muted: #5d636e;
+  --pool-border: #dcdfe4;
+  --pool-accent: #0b6bcb;
+  --pool-done: #1a7f45;
+  --pool-active: #b35c00;
+  --pool-warn-bg: #fff4d6;
+  --pool-warn-text: #6b4800;
+  --pool-radius: 10px;
+  --pool-card-width: 15rem;
+  --pool-font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --pool-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --pool-bg: #111316;
+    --pool-surface: #1b1e23;
+    --pool-text: #e8eaed;
+    --pool-muted: #9aa1ab;
+    --pool-border: #30343b;
+    --pool-accent: #6cb0ff;
+    --pool-done: #5fd08e;
+    --pool-active: #ffb65c;
+    --pool-warn-bg: #3a2e10;
+    --pool-warn-text: #ffd98a;
+  }
+}
+
+:root[data-theme='dark'] {
+  --pool-bg: #111316;
+  --pool-surface: #1b1e23;
+  --pool-text: #e8eaed;
+  --pool-muted: #9aa1ab;
+  --pool-border: #30343b;
+  --pool-accent: #6cb0ff;
+  --pool-done: #5fd08e;
+  --pool-active: #ffb65c;
+  --pool-warn-bg: #3a2e10;
+  --pool-warn-text: #ffd98a;
+}
