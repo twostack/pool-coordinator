@@ -56,6 +56,8 @@ void main() async {
     late Directory dir;
     late String configPath;
     late Timer miner;
+    // off while a test checks that no block is needed
+    var mining = true;
     late Created created;
     final passphrase = 'e2e passphrase';
     final rng = Random(17);
@@ -73,7 +75,9 @@ void main() async {
           password: env['POOL_RPC_PASSWORD'] ?? 'bitcoin',
           timeout: const Duration(seconds: 120));
       // localnet's autominer mines every ten minutes; the test mines every second
-      miner = Timer.periodic(const Duration(seconds: 1), (_) => node.generate(1).catchError((_) {}));
+      miner = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mining) node.generate(1).catchError((_) {});
+      });
       dir = Directory.systemTemp.createTempSync('pool-e2e');
       configPath = '${dir.path}/config.yaml';
       File(configPath).writeAsStringSync('''
@@ -137,7 +141,9 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
       }
     }
 
-    test('create: a pool from nothing, the genesis mined, the descriptor first on the feed', () async {
+    DateTime? fundedAt;
+
+    test('create: a pool from nothing, one block waited for, the genesis and the split in the mempool within 30 s, the descriptor first on the feed', () async {
       final config = await PoolConfig.load(configPath);
       final creator = PoolCreator(
         config: config,
@@ -149,18 +155,39 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
         kdf: KdfParams.light,
         say: (line) {
           print('  create: $line');
-          final m = RegExp(r'^fund (\S+) with at least (\d+) satoshis').firstMatch(line);
+          final m = RegExp(r'^fund (\S+) with one payment of at least (\d+) satoshis').firstMatch(line);
           if (m != null) {
-            // the operator pays the address from the node's wallet
-            unawaited(node.payFromNode(Address.fromBase58(m.group(1)!), BigInt.parse(m.group(2)!) + BigInt.from(100000)));
+            // the operator pays the address from the node's wallet, with
+            // enough over for the store: 3,000,000 sat to split
+            unawaited(node.payFromNode(Address.fromBase58(m.group(1)!), BigInt.parse(m.group(2)!) + BigInt.from(3000000)));
+          }
+          if (line.startsWith('the wallet holds') && line.endsWith('mined')) {
+            // the funding is mined: no block from here until create ends
+            mining = false;
+            fundedAt = DateTime.now();
           }
         },
       );
       final sw = Stopwatch()..start();
       created = await creator.run();
+      final sinceFunded = DateTime.now().difference(fundedAt!);
       timings['create'] = sw.elapsed;
+      timings['create from the funding mined'] = sinceFunded;
+      try {
+        expect(sinceFunded, lessThan(const Duration(seconds: 30)), reason: 'from the funding mined to the descriptor on the feed');
+        for (final tx in [created.slot0, created.issuance, created.witness0]) {
+          expect(await node.fetch(tx.id), isNotNull, reason: '${tx.id} accepted');
+          expect(await node.minedHeight(tx.id), isNull, reason: '${tx.id} in the mempool: no block was mined meanwhile');
+        }
+        final (_, contents) = await WalletFile.open(config.wallet.file, secrets(config).walletPassphrase);
+        expect(contents.splits, hasLength(1), reason: 'the rest split into the store, unmined');
+        expect(await node.fetch(contents.splits.single.id), isNotNull);
+        expect(await node.minedHeight(contents.splits.single.id), isNull);
+      } finally {
+        mining = true;
+      }
       for (final tx in [created.slot0, created.issuance, created.witness0]) {
-        expect(await node.minedHeight(tx.id), isNotNull, reason: '${tx.id} mined');
+        await untilMined(tx.id);
       }
       final after = await PoolConfig.load(configPath);
       expect(after.genesis!.issuance, created.issuance.id);
@@ -194,7 +221,8 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
           feeRate: config.round.feeRate,
           feeFloor: config.round.feeFloor,
           minedPoll: config.server.minedPoll,
-          fundingTimeout: config.server.fundingTimeout);
+          fundingTimeout: config.server.fundingTimeout,
+      coins: config.wallet.coins);
       final seed = await IdentityFile.read(config.ricochet.identityFile);
       final transport = await RicochetTransport.connect(seed: seed, server: ricochet.address, retryDelay: const Duration(milliseconds: 500));
       expect(transport.peerId, created.peerId, reason: 'the identity file gives the peer id the descriptor was published under');

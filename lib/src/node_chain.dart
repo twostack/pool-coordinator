@@ -150,7 +150,9 @@ class NodeChain implements ChainAccess {
           if (id is! String || !_isTxid(id) || vout is! int || vout < 0 || amount is! num || !amount.isFinite || amount < 0 || amount > 21000000) {
             throw ChainError(endpoint, 'listunspent returned an output it did not describe');
           }
-          out.add(UnspentOutput(id, vout, BigInt.from((amount * 100000000).round())));
+          // confirmations for now; unspentOf turns them into heights
+          final c = u['confirmations'];
+          out.add(UnspentOutput(id, vout, BigInt.from((amount * 100000000).round()), height: c is int && c > 0 ? c : null));
         }
         return out;
     }
@@ -207,7 +209,15 @@ class NodeChain implements ChainAccess {
       if (!known) await _rpc(NodeCall.validate, 'importaddress', [a, '', true]);
       _watched.add(a);
     }
-    return (await _call(NodeCall.unspent, 'listunspent', [0, 9999999, [a]]) as List<UnspentOutput>);
+    final listed = await _call(NodeCall.unspent, 'listunspent', [0, 9999999, [a]]) as List<UnspentOutput>;
+    if (listed.every((u) => u.height == null)) return listed;
+    // listunspent counts confirmations on the active chain, which a block
+    // left on a fork does not confuse, where getrawtransaction's index can
+    // (localnet's two nodes fork now and then)
+    final tip = await height();
+    return [
+      for (final u in listed) UnspentOutput(u.txid, u.vout, u.satoshis, height: u.height == null ? null : tip - u.height! + 1)
+    ];
   }
 
   /// Mines [n] blocks to a fresh address of the node's wallet. Regtest

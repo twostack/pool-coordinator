@@ -101,7 +101,8 @@ Future<void> _run(PoolConfig config, Secrets secrets, ChainAccess chain) async {
       feeRate: config.round.feeRate,
       feeFloor: config.round.feeFloor,
       minedPoll: config.server.minedPoll,
-      fundingTimeout: config.server.fundingTimeout);
+      fundingTimeout: config.server.fundingTimeout,
+      coins: config.wallet.coins);
   final seed = await IdentityFile.read(config.ricochet.identityFile);
   final transport = await RicochetTransport.connect(
       seed: seed, server: config.ricochet.server, sendRetries: config.ricochet.sendRetries, batch: 100);

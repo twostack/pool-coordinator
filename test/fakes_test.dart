@@ -54,6 +54,59 @@ void main() {
     });
   });
 
+  group('FakeChain for the coin pool', () {
+    Transaction spend(Transaction from, int n) => Transaction()
+      ..version = 1
+      ..addInput(TransactionInput(from.id, 0, TransactionInput.MAX_SEQ_NUMBER))
+      ..addOutput(TransactionOutput(BigInt.from(n), P2PKHLockBuilder.fromAddress(addr).getScriptPubkey()));
+
+    test('blocks are mined on demand, each taking every unmined transaction', () async {
+      final chain = FakeChain(height: 50)..mineOnBroadcast = false;
+      final a = coin(7, BigInt.from(1000));
+      chain.addMined(a);
+      final b = spend(a, 900);
+      await chain.broadcast(b);
+      expect(chain.mine(), 51);
+      expect(await chain.minedHeight(b.id), 51);
+      expect(chain.mine(), 52, reason: 'an empty block still moves the height');
+      expect(await chain.height(), 52);
+    });
+
+    test('a transaction accepted is not mined until the next block, and can be spent meanwhile', () async {
+      final chain = FakeChain(height: 50)..mineOnBroadcast = false;
+      final a = coin(8, BigInt.from(1000));
+      chain.addMined(a);
+      final b = spend(a, 900);
+      expect(await chain.broadcast(b), 'fake');
+      expect(await chain.minedHeight(b.id), isNull);
+      expect(await chain.fetch(b.id), isNotNull);
+      expect(await chain.unspent(b.id, 0), isTrue, reason: 'an unmined output is spendable');
+      final c = spend(b, 800);
+      await chain.broadcast(c);
+      expect(await chain.unspent(b.id, 0), isFalse, reason: 'spent by an unmined child');
+      chain.mine();
+      expect(await chain.minedHeight(b.id), 51);
+      expect(await chain.minedHeight(c.id), 51);
+    });
+
+    test('a transaction dropped from the mempool is unknown, its inputs are unspent again, and it can be broadcast again', () async {
+      final chain = FakeChain(height: 50)..mineOnBroadcast = false;
+      final a = coin(9, BigInt.from(1000));
+      chain.addMined(a);
+      final b = spend(a, 900);
+      await chain.broadcast(b);
+      expect(chain.drop(b.id), isTrue);
+      expect(await chain.fetch(b.id), isNull);
+      expect(await chain.unspent(a.id, 0), isTrue);
+      chain.mine();
+      expect(await chain.minedHeight(b.id), isNull, reason: 'a dropped transaction is not mined');
+      expect(chain.drop(a.id), isFalse, reason: 'a mined transaction cannot be dropped');
+      await chain.broadcast(b);
+      chain.mine();
+      expect(await chain.minedHeight(b.id), 52);
+    });
+  });
+
   group('FakeWallet', () {
     test('an output of exactly the value asked, paid to the owner, and the balance falls', () async {
       final w = FakeWallet(signer, key.publicKey, addr, balance: BigInt.from(5000));

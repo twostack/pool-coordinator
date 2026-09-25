@@ -36,11 +36,14 @@ class Created {
 }
 
 /// Issues a pool from nothing: the owner key and the ricochet identity
-/// generated and written, the operator asked to fund the address, then
-/// Y_0, the issuance and witness 0 built through the library's tool,
-/// sized as the localnet harness sizes them, mined one after another, the
-/// genesis txids written into the configuration and the descriptor
-/// appended as the feed's first entry. The only time the owner key is
+/// generated and written, the operator asked to fund the address and that
+/// funding waited for until mined (the one block `create` waits for), then
+/// Y_0, the issuance and witness 0 built through the library's tool, sized
+/// as the localnet harness sizes them, each funded along one chain of
+/// change above that coin and published without waiting for any block,
+/// the rest split into the wallet's store of coins, the genesis txids
+/// written into the configuration and the descriptor appended as the
+/// feed's first entry. The only time the owner key is
 /// generated, which is why it refuses to run over an existing wallet.
 class PoolCreator {
   final PoolConfig config;
@@ -102,19 +105,32 @@ class PoolCreator {
         feeRate: rate,
         feeFloor: config.round.feeFloor,
         minedPoll: config.server.minedPoll,
-        fundingTimeout: config.server.fundingTimeout);
+        fundingTimeout: config.server.fundingTimeout,
+        coins: config.wallet.coins)
+      ..splitting = false;
     say('wallet written to ${config.wallet.file}; back it up: losing the owner key after a round is published freezes the pool');
     say('identity written to ${config.ricochet.identityFile}');
 
-    // the coins
+    // the coins: one payment that covers the genesis, mined; the genesis is
+    // funded from it alone, one funding transaction on the change of the
+    // one before, and what is left becomes the wallet's store of coins
     final need = issuanceFunding + y + w + wallet.fundingFee(1) * BigInt.from(3);
-    say('fund ${wallet.address.toBase58()} with at least $need satoshis (Y_0 $y, witness 0 $w, the issuance $issuanceFunding with change back)');
+    say('fund ${wallet.address.toBase58()} with one payment of at least $need satoshis (Y_0 $y, witness 0 $w, '
+        'the issuance $issuanceFunding with change back); what is left over becomes the coins rounds are funded from');
+    bool funded() => wallet.contents.coins.any((c) => c.mined && c.satoshis >= need);
     await wallet.reconcile();
-    while (wallet.balance < need) {
+    var told = false;
+    while (!funded()) {
+      if (!told && wallet.balance >= need) {
+        say('the payment is seen and waits to be mined; that is the one block create waits for');
+        told = true;
+      }
       await Future<void>.delayed(pollInterval);
       await wallet.reconcile();
     }
-    say('the wallet holds ${wallet.balance} satoshis');
+    final fundedAt = DateTime.now();
+    say('the wallet holds ${wallet.balance} satoshis, mined');
+    wallet.spendPending = true;
 
     // the genesis: Y_0, the issuance spending its anchor, witness 0
     final signer = wallet.owner, pub = wallet.ownerPub, addr = wallet.address;
@@ -140,7 +156,15 @@ class PoolCreator {
     final w0 = tool.createWitnessTxn(signer, fW0.tx, r0, hex.decode(fI.tx.serialize()), pub, addr.pubkeyHash160, ShieldedPoolAction.CREATE,
         fundingVout: fW0.vout, slotParts: y0.parts, verifierBody: body);
     await _publish(w0, 'witness 0');
+
+    // the rest into the store, from the change the genesis left, unmined
+    wallet.splitting = true;
     await wallet.reconcile(roundTxs: [y0.tx, r0, w0]);
+    wallet.spendPending = false;
+    final split = wallet.splitsBuilt.isEmpty ? null : wallet.splitsBuilt.last;
+    say(split == null
+        ? 'nothing was split into the store; top up the address before the first round'
+        : 'split ${split.id} makes ${split.outputs.length} coins for the rounds, ready once mined');
 
     // the configuration, then the feed
     await writeGenesis(configPath, issuance: r0.id, witness0: w0.id, slot0: y0.tx.id);
@@ -150,7 +174,8 @@ class PoolCreator {
       await transport.ensureFeed();
       final d = PoolDescriptor.forPool(network: config.network, issuance: r0, witness0: w0, slot0: y0.tx, plan: plan);
       final seq = await transport.announce(d.encode());
-      say('descriptor appended as feed entry $seq under peer id ${transport.peerId}');
+      say('descriptor appended as feed entry $seq under peer id ${transport.peerId}, '
+          '${DateTime.now().difference(fundedAt).inMilliseconds} ms after the funding was mined');
       say('issuance ${r0.id}');
       say('witness0 ${w0.id}');
       say('slot0    ${y0.tx.id}');
@@ -160,15 +185,16 @@ class PoolCreator {
     }
   }
 
+  /// Broadcasts [tx] and goes on once the chain has accepted it.
   Future<void> _publish(Transaction tx, String what) async {
-    final st = await chain.broadcast(tx);
-    log.info('$what ${tx.id} broadcast ($st)');
-    final deadline = DateTime.now().add(config.server.fundingTimeout);
-    while (await chain.minedHeight(tx.id) == null) {
-      if (DateTime.now().isAfter(deadline)) throw CreateRefusal('$what ${tx.id} was not mined within ${config.server.fundingTimeout}');
-      await Future<void>.delayed(config.server.minedPoll);
+    final String st;
+    try {
+      st = await chain.broadcast(tx);
+    } on BroadcastRefusal catch (e) {
+      throw CreateRefusal('$what ${tx.id} was refused: ${e.reason}');
     }
-    say('$what ${tx.id} mined');
+    log.info('$what ${tx.id} broadcast ($st)');
+    say('$what ${tx.id} broadcast');
   }
 
   /// Writes the genesis block into the configuration file's text: the

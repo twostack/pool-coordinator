@@ -28,6 +28,10 @@ class PoolFacts {
   /// links to the chain only where the link resolves. The page builds the
   /// link itself from this name, never from a URL it is served.
   final String? explorer;
+
+  /// What a wallet needs to join the pool, or null when the operator has
+  /// not named it (`api.wallet`).
+  final WalletFacts? wallet;
   const PoolFacts({
     required this.network,
     required this.plan,
@@ -37,7 +41,22 @@ class PoolFacts {
     required this.slot0,
     required this.roundDeadline,
     this.explorer,
+    this.wallet,
   });
+}
+
+/// What `/api/pool` tells a wallet: the values `cloak init` and a wallet's
+/// `config.yaml` take, with the network named as cloak names it.
+class WalletFacts {
+  final String network;
+  final String server;
+  final String coordinator;
+  final List<String> peers;
+  final String? arcUrl;
+  const WalletFacts({required this.network, required this.server, required this.coordinator, this.peers = const [], this.arcUrl});
+
+  Map<String, Object?> toJson() =>
+      {'network': network, 'server': server, 'coordinator': coordinator, 'peers': peers, 'arcUrl': arcUrl};
 }
 
 /// The read-only HTTP view of the pool: the summary, pages of rounds, the
@@ -202,6 +221,7 @@ class PoolApi {
       'roundDeadlineSeconds': facts.roundDeadline.inSeconds,
       'publishIntervalSeconds': interval.inSeconds,
       'live': _live(gate.published, gate.publishedAt),
+      'wallet': facts.wallet?.toJson(),
     });
   }
 

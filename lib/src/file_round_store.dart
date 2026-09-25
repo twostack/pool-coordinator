@@ -10,9 +10,10 @@ import 'package:path/path.dart' as p;
 import 'round_store.dart';
 
 /// The store as a directory per round: `rounds/000001/` holds `y.tx`,
-/// `round.tx` and `witness.tx` as raw bytes, `snapshot.bin` as the
-/// library's snapshot, and `round.json`, a small versioned record of the
-/// number and the three txids. Five files an operator can inspect and copy
+/// `round.tx` and `witness.tx` as raw bytes, `funding-0.tx` and on for the
+/// funding transactions they spend, `snapshot.bin` as the library's
+/// snapshot, and `round.json`, a small versioned record of the number, the
+/// three txids and the funding txids (version 2; version 1 has none). Five files an operator can inspect and copy
 /// beat a database, and the library's snapshot is already the canonical
 /// state.
 ///
@@ -21,7 +22,8 @@ import 'round_store.dart';
 /// its files. Reading checks each transaction against the txid the record
 /// names, which is what catches a file cut short.
 class FileRoundStore extends RoundStore {
-  static const recordVersion = 1;
+  static const recordVersion = 2;
+  static const _readable = {1, 2};
   static const _files = ['y.tx', 'round.tx', 'witness.tx', 'snapshot.bin', 'round.json'];
 
   final String directory;
@@ -37,14 +39,25 @@ class FileRoundStore extends RoundStore {
   String _dir(int n) => p.join(_rounds, n.toString().padLeft(6, '0'));
 
   @override
-  Future<void> roundBuilt(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot) async {
+  Future<void> roundBuiltWith(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot,
+      {List<Transaction> funding = const []}) async {
     final dir = Directory(_dir(number));
     await dir.create(recursive: true);
     await _put(p.join(dir.path, 'y.tx'), hex.decode(y.serialize()));
     await _put(p.join(dir.path, 'round.tx'), hex.decode(round.serialize()));
     await _put(p.join(dir.path, 'witness.tx'), hex.decode(witness.serialize()));
+    for (int i = 0; i < funding.length; i++) {
+      await _put(p.join(dir.path, 'funding-$i.tx'), hex.decode(funding[i].serialize()));
+    }
     await _put(p.join(dir.path, 'snapshot.bin'), snapshot);
-    final record = {'version': recordVersion, 'number': number, 'y': y.id, 'round': round.id, 'witness': witness.id};
+    final record = {
+      'version': recordVersion,
+      'number': number,
+      'y': y.id,
+      'round': round.id,
+      'witness': witness.id,
+      'funding': [for (final f in funding) f.id],
+    };
     await _put(p.join(dir.path, 'round.json'), utf8.encode('${jsonEncode(record)}\n'));
     await prune(number);
   }
@@ -97,10 +110,10 @@ class FileRoundStore extends RoundStore {
       throw StoreRefusal(number, 'round.json', 'is not a round record ($e)');
     }
     final v = record['version'];
-    if (v != recordVersion) throw StoreRefusal(number, 'round.json', 'is version $v, and this server writes version $recordVersion');
+    if (!_readable.contains(v)) throw StoreRefusal(number, 'round.json', 'is version $v, and this server reads versions ${_readable.join(' and ')}');
     if (record['number'] != number) throw StoreRefusal(number, 'round.json', 'records round ${record['number']}');
-    Future<Transaction> tx(String file, String key) async {
-      final id = record[key];
+    Future<Transaction> tx(String file, String key, {String? txid}) async {
+      final id = txid ?? record[key];
       if (id is! String) throw StoreRefusal(number, 'round.json', 'names no $key txid');
       final f = File(p.join(dir, file));
       if (!f.existsSync()) throw StoreRefusal(number, file, 'is missing');
@@ -119,9 +132,16 @@ class FileRoundStore extends RoundStore {
     final y = await tx('y.tx', 'y');
     final round = await tx('round.tx', 'round');
     final witness = await tx('witness.tx', 'witness');
+    // version 1 names no funding: a round stored before the coin pool has
+    // none to broadcast again
+    final fundingIds = record['funding'] ?? const [];
+    if (fundingIds is! List) throw StoreRefusal(number, 'round.json', 'names funding that is not a list');
+    final funding = [
+      for (int i = 0; i < fundingIds.length; i++) await tx('funding-$i.tx', 'funding', txid: fundingIds[i] is String ? fundingIds[i] as String : null)
+    ];
     final snap = File(p.join(dir, 'snapshot.bin'));
     final snapshot = snap.existsSync() ? await snap.readAsBytes() : null;
-    return StoredRound(number, y, round, witness, snapshot);
+    return StoredRound(number, y, round, witness, snapshot, funding: funding);
   }
 
   Future<Map<String, dynamic>?> _record(int number) async {
@@ -129,7 +149,7 @@ class FileRoundStore extends RoundStore {
     if (!f.existsSync()) return null;
     try {
       final r = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
-      if (r['version'] != recordVersion || r['number'] != number) throw const FormatException('another record');
+      if (!_readable.contains(r['version']) || r['number'] != number) throw const FormatException('another record');
       return r;
     } catch (e) {
       throw StoreRefusal(number, 'round.json', 'is not a round record of this server ($e)');
@@ -167,5 +187,10 @@ class FileRoundStore extends RoundStore {
 
   /// Whether round [number]'s files are all present, for a test that asks
   /// at the moment of the first broadcast.
-  bool complete(int number) => _files.every((f) => File(p.join(_dir(number), f)).existsSync());
+  bool complete(int number) {
+    if (!_files.every((f) => File(p.join(_dir(number), f)).existsSync())) return false;
+    final record = jsonDecode(File(p.join(_dir(number), 'round.json')).readAsStringSync()) as Map<String, dynamic>;
+    final funding = (record['funding'] as List?) ?? const [];
+    return [for (int i = 0; i < funding.length; i++) 'funding-$i.tx'].every((f) => File(p.join(_dir(number), f)).existsSync());
+  }
 }

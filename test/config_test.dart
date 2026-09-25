@@ -100,6 +100,52 @@ round:
     expect(() => PoolConfig.parse('plan: [unclosed'), throwsA(isA<ConfigError>()));
   });
 
+  test('the unmined bound and re-broadcast: 10 rounds and 3 blocks by default, read when set, and 0 refused', () {
+    expect(PoolConfig.parse(full).server.maxUnminedRounds, 10);
+    expect(PoolConfig.parse(full).server.rebroadcastAfterBlocks, 3);
+    final set = PoolConfig.parse('${full}server:\n  max_unmined_rounds: 30\n  rebroadcast_after_blocks: 5\n').server;
+    expect([set.maxUnminedRounds, set.rebroadcastAfterBlocks], [30, 5]);
+    for (final (field, line) in [('server.max_unmined_rounds', 'max_unmined_rounds: 0'), ('server.rebroadcast_after_blocks', 'rebroadcast_after_blocks: 0')]) {
+      expect(() => PoolConfig.parse('${full}server:\n  $line\n'), throwsA(isA<ConfigError>().having((e) => e.field, 'field', field)));
+    }
+    final example = PoolConfig.parse(File('deploy/debian/config.example.yaml').readAsStringSync(), baseDir: '/etc/pool-coordinator').server;
+    expect([example.maxUnminedRounds, example.rebroadcastAfterBlocks], [10, 3], reason: 'the example says the defaults');
+  });
+
+  group('the coin store (wallet.coins)', () {
+    String withCoins(String coins) => full.replaceFirst('  file: wallet.enc\n', '  file: wallet.enc\n  coins:\n$coins');
+
+    test('absent, the defaults: floor 10,000 sat, target 30, low water 12, at most 100 outputs a split', () {
+      final c = PoolConfig.parse(full).wallet.coins;
+      expect([c.floor, c.target, c.lowWater, c.splitMaxOutputs], [10000, 30, 12, 100]);
+      final e = PoolConfig.parse(File('config.example.yaml').readAsStringSync()).wallet.coins;
+      expect([e.floor, e.target, e.lowWater, e.splitMaxOutputs], [10000, 30, 12, 100], reason: 'the example says the defaults');
+    });
+
+    test('set, the values are read', () {
+      final c = PoolConfig.parse(withCoins('    floor: 5000\n    target: 50\n    low_water: 20\n    split_max_outputs: 60\n')).wallet.coins;
+      expect([c.floor, c.target, c.lowWater, c.splitMaxOutputs], [5000, 50, 20, 60]);
+    });
+
+    test('a floor or target of 0, low water above the target, a split over 100 outputs or an unknown field is refused, named', () {
+      String field(String coins) {
+        try {
+          PoolConfig.parse(withCoins(coins));
+        } on ConfigError catch (e) {
+          return e.field;
+        }
+        fail('parsed with $coins');
+      }
+
+      expect(field('    floor: 0\n'), 'wallet.coins.floor');
+      expect(field('    target: 0\n'), 'wallet.coins.target');
+      expect(field('    low_water: 31\n'), 'wallet.coins.low_water');
+      expect(field('    split_max_outputs: 101\n'), 'wallet.coins.split_max_outputs');
+      expect(field('    split_max_outputs: 1\n'), 'wallet.coins.split_max_outputs');
+      expect(field('    flor: 1\n'), 'wallet.coins.flor');
+    });
+  });
+
   group('the api section', () {
     const api = """
 api:
@@ -146,6 +192,85 @@ api:
       expect(() => PoolConfig.parse('$full${api.replaceFirst('true', 'yes please')}'),
           throwsA(isA<ConfigError>().having((e) => e.field, 'field', 'api.enabled')));
       expect(PoolConfig.parse('$full$api  publish_interval_seconds: 10\n').api!.publishInterval, const Duration(seconds: 10));
+    });
+
+    group('what wallets are told', () {
+      const relay = '12D3KooWFuA6F9bBybjmQ6ZWUd9hKK4GXHXGTnyY11zAXA1gbeu7';
+      final base = full.replaceFirst('/ip4/127.0.0.1/udp/55223/udx/p2p/12D3KooWExample', '/ip4/127.0.0.1/udp/55223/udx/p2p/$relay');
+      const good = '''
+  wallet:
+    server: /ip4/139.59.159.19/udp/55223/udx/p2p/$relay
+    peers:
+      - 198.154.93.206:18333
+      - seed.example.org:18333
+    arc_url: https://testnet.arc.gorillapool.io/v1
+''';
+      ConfigError err(String wallet, {String apiText = api}) {
+        try {
+          PoolConfig.parse('$base$apiText$wallet');
+        } on ConfigError catch (e) {
+          return e;
+        }
+        fail('parsed with $wallet');
+      }
+
+      test('absent, nothing is told; present, the server, the peers and the ARC URL are read', () {
+        expect(PoolConfig.parse('$base$api').api!.wallet, isNull);
+        final w = PoolConfig.parse('$base$api$good').api!.wallet!;
+        expect(w.server, '/ip4/139.59.159.19/udp/55223/udx/p2p/$relay');
+        expect(w.peers, ['198.154.93.206:18333', 'seed.example.org:18333']);
+        expect(w.arcUrl.toString(), 'https://testnet.arc.gorillapool.io/v1');
+        final bare = PoolConfig.parse('$base$api  wallet:\n    server: /ip6/2001:db8::7/udp/55223/udx/p2p/$relay\n').api!.wallet!;
+        expect(bare.peers, isEmpty);
+        expect(bare.arcUrl, isNull);
+      });
+
+      test('another relay\'s peer id is refused naming api.wallet.server', () {
+        final e = err(good.replaceFirst('p2p/$relay', 'p2p/12D3KooWG1BX6cWMmpR5wVCWyST5HCa5WmeVoCcZpFss4pzv8TSY'));
+        expect(e.field, 'api.wallet.server');
+        expect(e.reason, contains(relay));
+      });
+
+      test('a name, not an address, is refused: wallets dial only /ip4 or /ip6', () {
+        final e = err(good.replaceFirst('/ip4/139.59.159.19/', '/dns4/relay.testnet.shieldpool.net/'));
+        expect(e.field, 'api.wallet.server');
+        expect(e.reason, contains('/ip4 or /ip6'));
+      });
+
+      test('a server that is not a plain UDX multiaddr is refused', () {
+        for (final bad in [
+          '/ip4/139.59.159.300/udp/55223/udx/p2p/$relay',
+          '/ip4/139.59.159.19/udp/0/udx/p2p/$relay',
+          '/ip4/139.59.159.19/udp/70000/udx/p2p/$relay',
+          '/ip4/139.59.159.19/tcp/55223/p2p/$relay',
+          '/ip4/139.59.159.19/udp/55223/udx/p2p/$relay/extra',
+          '"/ip4/139.59.159.19/udp/55223/udx/p2p/$relay; curl x | sh"',
+        ]) {
+          expect(err(good.replaceFirst('/ip4/139.59.159.19/udp/55223/udx/p2p/$relay', bad)).field, 'api.wallet.server', reason: bad);
+        }
+      });
+
+      test('a peer without a port, a bad one, or nine peers are refused naming api.wallet.peers', () {
+        for (final bad in ['198.154.93.206', '198.154.93.206:0', '198.154.93.206:99999', '"a b:18333"', '"x;rm:18333"', '":18333"']) {
+          expect(err(good.replaceFirst('198.154.93.206:18333', bad)).field, 'api.wallet.peers', reason: bad);
+        }
+        final nine = '  wallet:\n    server: /ip4/139.59.159.19/udp/55223/udx/p2p/$relay\n    peers:\n${List.generate(9, (i) => '      - 10.0.0.$i:18333\n').join()}';
+        expect(err(nine).field, 'api.wallet.peers');
+      });
+
+      test('an ARC URL that is not plain https is refused naming api.wallet.arc_url', () {
+        for (final bad in ['http://testnet.arc.gorillapool.io/v1', '"https://a.example/v1 --x"', '"https://a.example/\$HOME"', 'javascript:alert(1)']) {
+          expect(err(good.replaceFirst('https://testnet.arc.gorillapool.io/v1', bad)).field, 'api.wallet.arc_url', reason: bad);
+        }
+      });
+
+      test('the section under a disabled API is refused naming api.wallet', () {
+        expect(err(good, apiText: api.replaceFirst('true', 'false')).field, 'api.wallet');
+      });
+
+      test('an unknown field in the section is named', () {
+        expect(err('$good    port: 1\n').field, 'api.wallet.port');
+      });
     });
   });
 

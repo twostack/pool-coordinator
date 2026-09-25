@@ -17,6 +17,9 @@ class ServerStatus {
   int pending = 0, capacity = 0, inFlight = 0, paddingStock = 0;
   WalletReport? wallet;
   bool needsTopUp = false;
+
+  /// Why the next round's funding is held, or null when it is not.
+  String? waiting;
   String? lastFailure;
   final List<String> failures = [];
   int? lastAnnouncedRound, lastAnnouncementSequence;
@@ -57,6 +60,7 @@ class ServerStatus {
         'paddingStock': paddingStock,
         'wallet': wallet?.toJson(),
         'needsTopUp': needsTopUp,
+        'waiting': waiting,
         'lastFailure': lastFailure,
         'failures': failures,
         'lastAnnouncement': lastAnnouncedRound == null ? null : {'round': lastAnnouncedRound, 'sequence': lastAnnouncementSequence},
