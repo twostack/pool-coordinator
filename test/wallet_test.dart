@@ -260,6 +260,53 @@ void main() {
       expect(back.coins.single.outpoint, '${chain.known.values.first.id}:0');
     });
 
+    test('a split the chain\'s indexer does not show yet, its source already spent by it: kept after a restart, with no second split and nothing taken as a top-up', () async {
+      final coinsCfg = const CoinsConfig(floor: 10000, target: 10, lowWater: 5);
+      final (w, chain) = await wallet(amounts: [1000000, 60000], coins: coinsCfg);
+      chain.listUnmined = true;
+      await w.reconcile();
+      final split = w.contents.splits.single;
+      expect(await chain.unspent(split.inputs.single.prevTxnId, 0), isFalse, reason: 'spent by the split, in the mempool');
+      chain.lagging.add(split.id);
+      final logs = <String>[];
+      final (file, back) = await WalletFile.open(w.file.path, 'open sesame');
+      final restarted = FileWallet(file: file, contents: back, chain: chain, feeRate: 1, coins: coinsCfg);
+      final sub = restarted.log.onRecord.listen((r) => logs.add(r.message));
+      await restarted.reconcile();
+      await sub.cancel();
+      expect(restarted.contents.splits.map((t) => t.id), [split.id], reason: 'still recorded');
+      expect(restarted.splitsBuilt.where((t) => t.id != split.id), isEmpty, reason: 'no second split');
+      expect(logs.where((m) => m.contains('top-up')), isEmpty);
+      expect(restarted.report.pendingCoins, 9, reason: 'the split\'s outputs: the target less the one ready coin');
+      expect(restarted.report.readyCoins, 1, reason: 'the 60,000 coin, not split');
+      chain.mine();
+      chain.lagging.clear();
+      await restarted.reconcile();
+      expect(restarted.contents.splits, isEmpty);
+      expect(restarted.report.readyCoins, 10);
+    });
+
+    test('a split refused when broadcast again, its source spent elsewhere: dropped, the source not put back', () async {
+      final coinsCfg = const CoinsConfig(floor: 10000, target: 10, lowWater: 5);
+      final (w, chain) = await wallet(amounts: [1000000], coins: coinsCfg);
+      chain.beforeBroadcast = (_) async => throw const _Stopped();
+      await expectLater(w.reconcile(), throwsA(isA<_Stopped>()));
+      chain.beforeBroadcast = null;
+      final (file, back) = await WalletFile.open(w.file.path, 'open sesame');
+      final split = back.splits.single;
+      // meanwhile the source was spent by another transaction
+      final other = Transaction()
+        ..version = 1
+        ..addInput(TransactionInput(split.inputs.single.prevTxnId, 0, TransactionInput.MAX_SEQ_NUMBER))
+        ..addOutput(TransactionOutput(BigInt.from(1000), SVScript()));
+      chain.accept(other);
+      chain.refuse = (tx) => tx.id == split.id ? 'txn-mempool-conflict' : null;
+      final restarted = FileWallet(file: file, contents: back, chain: chain, feeRate: 1, coins: coinsCfg);
+      await restarted.reconcile();
+      expect(restarted.contents.splits, isEmpty);
+      expect(restarted.contents.coins, isEmpty, reason: 'neither the split\'s outputs nor the spent source');
+    });
+
     test('a crash before the split\'s broadcast: the next start broadcasts it once, and its outputs are pending', () async {
       final (w, chain) = await wallet(amounts: [1000000], coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
       // the process stops between the file's write and the broadcast

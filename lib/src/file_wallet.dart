@@ -337,8 +337,12 @@ class FileWallet implements CoordinatorWallet {
   }
 
   /// Splits written but not yet mined: broadcast again any the chain does
-  /// not know (a crash between the write and the broadcast), drop any whose
-  /// source the chain shows spent elsewhere, forget those mined.
+  /// not show (a crash between the write and the broadcast), forget those
+  /// mined. The chain's word that a split is unknown is not enough to drop
+  /// it: an indexer can lag the broadcast by minutes while already showing
+  /// the source spent, by the split itself. So a split is broadcast again,
+  /// and only a refusal that is not "already known" drops it, putting its
+  /// source back when that is still unspent.
   Future<void> _resumeSplits() async {
     for (final s in [...contents.splits]) {
       if (await chain.minedHeight(s.id) != null) {
@@ -346,24 +350,27 @@ class FileWallet implements CoordinatorWallet {
         continue;
       }
       if (await chain.fetch(s.id) != null) continue;
-      final i = s.inputs.single;
-      if (!await chain.unspent(i.prevTxnId, i.prevTxnOutputIndex)) {
-        await _undoSplit(s, restoreSource: false);
-        log.warning('split ${s.id} was never broadcast and its source is spent elsewhere; dropped');
-        continue;
-      }
       try {
         await chain.broadcast(s);
         splitsBuilt.add(s);
-        log.info('split ${s.id}, written before a stop, broadcast now');
+        log.info('split ${s.id}, not shown by the chain, broadcast again');
       } on BroadcastRefusal catch (e) {
-        await _undoSplit(s, restoreSource: true);
-        log.warning('split ${s.id} refused by the chain: ${e.reason}; its source is ready again');
+        if (alreadyKnown(e)) continue;
+        final i = s.inputs.single;
+        final sourceUnspent = await chain.unspent(i.prevTxnId, i.prevTxnOutputIndex);
+        await _undoSplit(s, restoreSource: sourceUnspent);
+        log.warning('split ${s.id} refused by the chain when broadcast again: ${e.reason}; '
+            '${sourceUnspent ? 'its source is ready again' : 'its source is spent elsewhere'}');
       } on ChainError catch (e) {
-        log.warning('split ${s.id} could not be broadcast yet: $e');
+        log.warning('split ${s.id} could not be broadcast again yet: $e');
       }
     }
   }
+
+  /// A refusal that says the chain has the transaction already, which a
+  /// transaction broadcast again counts as its acceptance.
+  static bool alreadyKnown(BroadcastRefusal e) =>
+      RegExp(r'already (known|in|have)|txn-already|known transaction', caseSensitive: false).hasMatch('${e.status ?? ''} ${e.reason}');
 
   /// The source coin of a split, kept while the split is on its way so a
   /// refusal can put it back.
