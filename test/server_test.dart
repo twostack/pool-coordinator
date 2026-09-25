@@ -403,14 +403,18 @@ void main() {
           return seen.containsKey('t3');
         }, what: 'the transfers\' replies');
         for (final k in ['t1', 't2', 't3']) {
-          expect(seen[k], lessThan(const Duration(seconds: 2)), reason: '$k while the covenant is being broadcast');
+          expect(fresh.transport.repliedAt[k]!.difference(fresh.transport.sentAt[k]!), lessThan(const Duration(seconds: 2)),
+              reason: '$k while the covenant is being broadcast');
           expect(replyOf(fresh, k).isAccepted, isTrue);
         }
         expect(seen.containsKey('d'), isFalse, reason: 'the deposit waits for its broadcast');
         expect(fresh.server.co.building, isNotNull, reason: 'the round is full and closed');
         expect(fresh.chain.broadcasts, isEmpty, reason: 'nothing is published while the deposit is being admitted');
-        await until(() async => fresh.transport.replies['d'] != null, what: 'the deposit\'s reply', timeout: const Duration(seconds: 25));
-        expect(DateTime.now().difference(t0), lessThan(const Duration(seconds: 20)));
+        await until(() async => fresh.transport.replies['d'] != null, what: 'the deposit\'s reply', timeout: const Duration(minutes: 2));
+        // when it was sent, not when this loop saw it: the full round proves
+        // on this isolate as soon as the deposit is admitted, and holds the
+        // loop back for the proof's length on a slow runner
+        expect(fresh.transport.repliedAt['d']!.difference(fresh.transport.sentAt['d']!), lessThan(const Duration(seconds: 20)));
         expect(replyOf(fresh, 'd').isAccepted, isTrue);
         await until(() async => fresh.transport.entries.length == 2 && !fresh.server.publishing, what: 'round 1 to be announced');
         final r1 = (await fresh.store.read(1))!;
