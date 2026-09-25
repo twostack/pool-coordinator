@@ -12,6 +12,7 @@ import 'chain_access.dart';
 import 'api/api_host.dart';
 import 'api/pool_api.dart';
 import 'config.dart';
+import 'file_wallet.dart';
 import 'funding_requests.dart';
 import 'install_check.dart' show kernelsMissing;
 import 'metrics/history_rebuild.dart';
@@ -279,8 +280,7 @@ class PoolServer {
 
   /// A refusal that says the chain has the transaction already, which a
   /// broadcast made again counts as its acceptance.
-  static bool _alreadyKnown(BroadcastRefusal e) =>
-      RegExp(r'already (known|in|have)|txn-already|known transaction', caseSensitive: false).hasMatch('${e.status ?? ''} ${e.reason}');
+  static bool _alreadyKnown(BroadcastRefusal e) => FileWallet.alreadyKnown(e);
 
   /// During a run: round [n] still unmined some blocks after publication
   /// is broadcast again, funding first. Nothing here stops the server; a

@@ -62,9 +62,14 @@ class FakeChain implements ChainAccess {
     }
   }
 
+  /// Transactions [fetch] does not return though the chain has them, as
+  /// an indexer that lags the broadcast (WhatsOnChain, testnet, 2026-09-25).
+  final lagging = <String>{};
+
   @override
   Future<Transaction?> fetch(String txid) async {
     fetches++;
+    if (lagging.contains(txid)) return null;
     return known[txid];
   }
 
