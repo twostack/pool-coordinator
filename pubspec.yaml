@@ -1,6 +1,6 @@
 name: pool_coordinator
 description: "The TSL1_SP shielded pool coordinator server: runs a pool over a ricochet inbox and feed, funds and publishes its rounds, and keeps its ledger."
-version: 0.1.7
+version: 0.1.8
 publish_to: none
 
 environment:
