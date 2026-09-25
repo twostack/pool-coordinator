@@ -431,6 +431,40 @@ void main() {
       expect(w.built, hasLength(3));
     });
 
+    test('a returned output the chain shows mined and spent is dropped at the next start, as 0.1.3 left one on testnet', () async {
+      final (w, chain) = await wallet(amounts: [40000, 12000]);
+      final f = (await w.output(BigInt.from(648)))!;
+      // 0.1.3's reconcile: the round spent it, the indexer lagged, and the
+      // output was marked returned, with no height
+      final wTx = Transaction()
+        ..addInput(TransactionInput(f.tx.id, f.vout, TransactionInput.MAX_SEQ_NUMBER))
+        ..addOutput(TransactionOutput(BigInt.one, SVScript()));
+      w.contents.offered.clear();
+      w.contents.coins.add(WalletCoin(f.tx, f.vout, returned: true));
+      await w.file.write(w.contents);
+      // since then both were mined, and the chain shows the spend
+      await chain.broadcast(wTx);
+      chain.mine();
+      final (file, back) = await WalletFile.open(w.file.path, 'open sesame');
+      final restarted = FileWallet(file: file, contents: back, chain: chain, feeRate: 1, coins: const CoinsConfig(floor: 10000, lowWater: 0));
+      await restarted.reconcile();
+      expect(restarted.contents.coins.where((c) => c.returned), isEmpty, reason: 'dropped at the first reconcile');
+      expect(restarted.contents.coins.any((c) => c.outpoint == '${f.tx.id}:${f.vout}'), isFalse);
+    });
+
+    test('a returned output spent on the chain is not offered again, even between reconciles', () async {
+      final (w, chain) = await wallet(amounts: [40000, 12000]);
+      final f = (await w.output(BigInt.from(648)))!;
+      w.contents.offered.clear();
+      w.contents.coins.add(WalletCoin(f.tx, f.vout, returned: true));
+      await chain.broadcast(Transaction()
+        ..addInput(TransactionInput(f.tx.id, f.vout, TransactionInput.MAX_SEQ_NUMBER))
+        ..addOutput(TransactionOutput(BigInt.one, SVScript())));
+      final next = (await w.output(BigInt.from(416)))!;
+      expect(next.tx.id == f.tx.id && next.vout == f.vout, isFalse, reason: 'a fresh funding, not the spent output');
+      expect(w.contents.coins.where((c) => c.returned), isEmpty);
+    });
+
     test('a refused funding transaction leaves the coin ready and fails with the chain\'s reason', () async {
       final (w, chain) = await wallet();
       chain.refuse = (_) => 'mempool full';
