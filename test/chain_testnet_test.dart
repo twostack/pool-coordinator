@@ -118,6 +118,44 @@ void main() {
     expect(arc.method, 'POST');
   });
 
+  test('a transaction\'s status by txid is ARC\'s record: 404 unknown, seen, mined, and anything short of seen unknown', () async {
+    final id = spend().id;
+    expect(await chain.statusOf(id), TxStatus.unknown, reason: 'no route is a 404: ARC has no record');
+    for (final (arc, want) in [
+      ('SEEN_ON_NETWORK', TxStatus.seen),
+      ('ACCEPTED_BY_NETWORK', TxStatus.seen),
+      ('MINED', TxStatus.mined),
+      ('STORED', TxStatus.unknown),
+      ('DOUBLE_SPEND_ATTEMPTED', TxStatus.unknown),
+      ('REJECTED', TxStatus.unknown),
+    ]) {
+      fake.routes['/arc/v1/tx/$id'] = (_) => Answer.json(200, {'txid': id, 'txStatus': arc, 'status': 200, 'title': 'OK'});
+      expect(await chain.statusOf(id), want, reason: arc);
+    }
+    fake.routes['/arc/v1/tx/$id'] = (_) => Answer.json(200, {'txid': coinbaseId, 'txStatus': 'MINED'});
+    await expectLater(chain.statusOf(id), throwsA(isA<ChainError>().having((e) => e.reason, 'reason', contains(coinbaseId))));
+    fake.routes['/arc/v1/tx/$id'] = (_) => const Answer(200, 'not json');
+    await expectLater(chain.statusOf(id), throwsA(isA<ChainError>().having((e) => e.endpoint, 'endpoint', contains('ARC'))));
+  });
+
+  test('broadcastSeen: MINED is mined, SEEN_ON_NETWORK seen, "already known" settled by the status, and the wait is ARC\'s timeout', () async {
+    await chain.fetch(coinbaseId);
+    final tx = spend();
+    fake.routes['/arc/v1/tx'] = (_) => Answer.json(200, {'txid': tx.id, 'txStatus': 'MINED', 'status': 200, 'title': 'OK'});
+    expect(await broadcastSeen(chain, tx, wait: const Duration(seconds: 12)), TxStatus.mined);
+    expect(fake.headers.last['x-maxtimeout'], '12');
+    fake.routes['/arc/v1/tx'] = (_) => Answer.json(200, {'txid': tx.id, 'txStatus': 'SEEN_ON_NETWORK', 'status': 200, 'title': 'OK'});
+    expect(await broadcastSeen(chain, tx), TxStatus.seen);
+    expect(fake.headers.last['x-maxtimeout'], '30', reason: 'the default');
+    // a refusal that says the chain has it: the status by txid decides
+    fake.routes['/arc/v1/tx'] = (_) => Answer.json(409, {'status': 409, 'title': 'Conflict', 'detail': 'Transaction already known'});
+    fake.routes['/arc/v1/tx/${tx.id}'] = (_) => Answer.json(200, {'txid': tx.id, 'txStatus': 'MINED'});
+    expect(await broadcastSeen(chain, tx), TxStatus.mined);
+    // and any other refusal is one
+    fake.routes['/arc/v1/tx'] = (_) => const Answer(400, arcMalformed);
+    await expectLater(broadcastSeen(chain, tx), throwsA(isA<BroadcastRefusal>()));
+  });
+
   test('ARC without peers: STORED is a refusal with that status', () async {
     fake.routes['/arc/v1/tx'] = (_) => Answer.json(200, {'txid': spend().id, 'txStatus': 'STORED', 'status': 200, 'title': 'OK'});
     await expectLater(chain.broadcast(spend()),

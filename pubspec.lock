@@ -725,10 +725,10 @@ packages:
     dependency: "direct main"
     description:
       name: tstokenlib
-      sha256: "8de0235767b3896e2d3b5863346dc55c89c18ec345276e18c07313d08783bdae"
+      sha256: "734e1aefc733145ca2438894a5b32d162cc81fae8e439bd9566a7aa8f19e1c6d"
       url: "https://pub.dev"
     source: hosted
-    version: "2.0.1"
+    version: "2.0.2"
   typed_data:
     dependency: transitive
     description:

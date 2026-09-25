@@ -26,6 +26,36 @@ class BroadcastRefusal implements Exception {
   String toString() => '$endpoint refused the transaction${status == null ? '' : ' ($status)'}: $reason';
 }
 
+/// What the chain holds of a transaction: nothing, the transaction unmined
+/// (a node or ARC has seen it on the network), or the transaction mined.
+enum TxStatus { unknown, seen, mined }
+
+/// A refusal that says the chain has the transaction already, which a
+/// transaction broadcast again counts as its acceptance. The wording is
+/// the node's ("txn-already-known", "Transaction already in block chain")
+/// and ARC's; ARC's live wording is not yet confirmed, which is why a
+/// caller that must know asks [ChainAccess.statusOf] as well.
+bool alreadyKnown(BroadcastRefusal e) =>
+    RegExp(r'already (known|in|have)|txn-already|known transaction', caseSensitive: false).hasMatch('${e.status ?? ''} ${e.reason}');
+
+/// Broadcasts [tx] and says what the chain now holds: seen, or mined when
+/// it was mined already. A refusal that says the chain has it is taken as
+/// acceptance, with its status asked by txid, so a covenant a wallet
+/// broadcast and got mined is told apart from one only just seen. [wait]
+/// bounds how long the endpoint waits for the network, where it can.
+Future<TxStatus> broadcastSeen(ChainAccess chain, Transaction tx, {Duration? wait}) async {
+  try {
+    final st = await chain.broadcast(tx, wait: wait);
+    return const {'MINED', 'CONFIRMED'}.contains(st) ? TxStatus.mined : TxStatus.seen;
+  } on BroadcastRefusal catch (e) {
+    if (!alreadyKnown(e)) rethrow;
+    final s = await chain.statusOf(tx.id);
+    // the chain said it has it; an indexer that has not caught up says
+    // unknown, which is not a reason to doubt the chain
+    return s == TxStatus.unknown ? TxStatus.seen : s;
+  }
+}
+
 /// One unspent output at an address, as the top-up scan finds it, with
 /// the height its transaction was mined at when the endpoint says (null
 /// while it is unmined, or when the endpoint does not say).
@@ -139,8 +169,14 @@ abstract class ChainAccess {
 
   /// Publishes [tx]. Returns the endpoint's acceptance status; throws
   /// [BroadcastRefusal] when the chain would not take it and [ChainError]
-  /// when the endpoint could not be asked.
-  Future<String> broadcast(Transaction tx);
+  /// when the endpoint could not be asked. [wait] bounds how long an
+  /// endpoint that waits for the network (ARC) waits before answering;
+  /// null is the implementation's default.
+  Future<String> broadcast(Transaction tx, {Duration? wait});
+
+  /// Whether the network has seen [txid], has mined it, or does not know
+  /// it: what settles a broadcast that timed out.
+  Future<TxStatus> statusOf(String txid);
 
   /// The height [txid] was mined at, or null when it is unknown or still
   /// unconfirmed.

@@ -8,7 +8,7 @@ import 'http_json.dart';
 
 /// The RPC methods the node implementation calls, named so the decoding
 /// of each answer can be tested apart from the transport.
-enum NodeCall { fetch, height, broadcast, mined, block, proof, txout, validate, unspent }
+enum NodeCall { fetch, height, broadcast, mined, block, proof, txout, validate, unspent, status }
 
 /// The node's own refusal of a call, as its JSON-RPC error.
 class _RpcError implements Exception {
@@ -84,6 +84,9 @@ class NodeChain implements ChainAccess {
       result = decodeEnvelope(endpoint, status, body);
     } on _RpcError catch (e) {
       switch (call) {
+        case NodeCall.status:
+          if (e.code == -5) return TxStatus.unknown;
+          throw ChainError(endpoint, 'refused $call: ${e.message} (${e.code})');
         case NodeCall.fetch:
         case NodeCall.mined:
         case NodeCall.block:
@@ -123,6 +126,14 @@ class NodeChain implements ChainAccess {
         final height = result['blockheight'];
         if (height is! int || height < 0) throw ChainError(endpoint, 'getrawtransaction returned a mined transaction without its height');
         return height;
+      case NodeCall.status:
+        // the verbose getrawtransaction knows the mempool as well as the
+        // chain; confirmations appear once it is mined
+        if (result == null) return TxStatus.unknown;
+        if (result is! Map<String, dynamic>) throw ChainError(endpoint, 'getrawtransaction returned something other than a transaction');
+        final c = result['confirmations'];
+        if (c != null && c is! int) throw ChainError(endpoint, 'getrawtransaction returned confirmations that are not a number');
+        return c is int && c > 0 ? TxStatus.mined : TxStatus.seen;
       case NodeCall.block:
         if (result == null) return null;
         if (result is! Map<String, dynamic>) throw ChainError(endpoint, 'getrawtransaction returned something other than a transaction');
@@ -178,8 +189,11 @@ class NodeChain implements ChainAccess {
   Future<int> height() async => await _call(NodeCall.height, 'getblockcount', []) as int;
 
   @override
-  Future<String> broadcast(Transaction tx) async =>
+  Future<String> broadcast(Transaction tx, {Duration? wait}) async =>
       await _call(NodeCall.broadcast, 'sendrawtransaction', [tx.serialize()], txid: tx.id) as String;
+
+  @override
+  Future<TxStatus> statusOf(String txid) async => await _call(NodeCall.status, 'getrawtransaction', [txid, 1]) as TxStatus;
 
   @override
   Future<int?> minedHeight(String txid) async => await _call(NodeCall.mined, 'getrawtransaction', [txid, 1]) as int?;

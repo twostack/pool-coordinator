@@ -6,6 +6,7 @@ import 'package:tstokenlib/tstokenlib.dart';
 
 import 'benford.dart';
 import 'chain_access.dart';
+import 'chain_access.dart' as chain_access show alreadyKnown;
 import 'config.dart';
 import 'wallet.dart';
 import 'wallet_file.dart';
@@ -403,8 +404,7 @@ class FileWallet implements CoordinatorWallet {
 
   /// A refusal that says the chain has the transaction already, which a
   /// transaction broadcast again counts as its acceptance.
-  static bool alreadyKnown(BroadcastRefusal e) =>
-      RegExp(r'already (known|in|have)|txn-already|known transaction', caseSensitive: false).hasMatch('${e.status ?? ''} ${e.reason}');
+  static bool alreadyKnown(BroadcastRefusal e) => chain_access.alreadyKnown(e);
 
   /// The source coin of a split, kept while the split is on its way so a
   /// refusal can put it back.

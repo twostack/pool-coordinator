@@ -9,7 +9,7 @@ import 'http_json.dart';
 
 /// The endpoints the testnet implementation calls, named so the decoding
 /// of each answer can be tested apart from the transport.
-enum TestnetCall { fetch, chainInfo, txStatus, proof, spent, unspentAll, arcTx }
+enum TestnetCall { fetch, chainInfo, txStatus, proof, spent, unspentAll, arcTx, arcStatus }
 
 /// The chain through ARC and WhatsOnChain, for BSV testnet: a broadcast
 /// goes to ARC in the extended format (each input with the output it
@@ -139,6 +139,19 @@ class TestnetChain implements ChainAccess {
         final words = [j['title'], j['detail'], j['extraInfo']].whereType<String>().where((s) => s.isNotEmpty).join('; ');
         throw BroadcastRefusal(endpoint, words.isEmpty ? 'status $status' : words,
             status: txStatus is String ? txStatus : '$status');
+      case TestnetCall.arcStatus:
+        // ARC's record of a transaction: 404 when it has none. Only what a
+        // broadcast would accept counts as seen; STORED, a rejection or a
+        // double spend attempted is not something to admit on
+        if (status == 404) return TxStatus.unknown;
+        final j = _json(endpoint, status, body);
+        final txStatus = j['txStatus'];
+        if (txStatus is! String) throw ChainError(endpoint, 'answered a status query without a txStatus');
+        final id = j['txid'];
+        if (id is String && id != txid) throw ChainError(endpoint, 'answered the status of $id when $txid was asked');
+        if (txStatus == 'MINED' || txStatus == 'CONFIRMED') return TxStatus.mined;
+        if (acceptedStatuses.contains(txStatus)) return TxStatus.seen;
+        return TxStatus.unknown;
     }
   }
 
@@ -202,7 +215,14 @@ class TestnetChain implements ChainAccess {
   }
 
   @override
-  Future<String> broadcast(Transaction tx) async {
+  Future<TxStatus> statusOf(String txid) async {
+    final uri = Uri.parse('${arcUrl.toString().replaceAll(RegExp(r'/$'), '')}/tx/$txid');
+    final reply = await _http.send(_arc, uri);
+    return decode(TestnetCall.arcStatus, _arc, reply.status, reply.body, txid: txid) as TxStatus;
+  }
+
+  @override
+  Future<String> broadcast(Transaction tx, {Duration? wait}) async {
     final over = overLimit(tx);
     if (over != null) {
       throw BroadcastRefusal(_arc,
@@ -212,7 +232,7 @@ class TestnetChain implements ChainAccess {
     final uri = Uri.parse('${arcUrl.toString().replaceAll(RegExp(r'/$'), '')}/tx');
     final reply = await _http.send(_arc, uri,
         method: 'POST',
-        headers: {'content-type': 'application/json', 'X-WaitFor': 'SEEN_ON_NETWORK', 'X-MaxTimeout': '30'},
+        headers: {'content-type': 'application/json', 'X-WaitFor': 'SEEN_ON_NETWORK', 'X-MaxTimeout': '${wait?.inSeconds ?? 30}'},
         body: jsonEncode({'rawTx': hex.encode(ef)}));
     final status = decode(TestnetCall.arcTx, _arc, reply.status, reply.body, txid: tx.id) as String;
     _known[tx.id] = tx;

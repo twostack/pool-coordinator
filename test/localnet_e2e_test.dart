@@ -258,8 +258,8 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
             pp3Outpoint: c.svc.getOutpoint(created.issuance.hash, outputIndex: 3),
             refundPKH: hex.decode(stranger.pubkeyHash160),
             refundAfter: height + 150);
-        await node.broadcast(covenant);
-        await untilMined(covenant.id);
+        // handed to the coordinator unbroadcast: the coordinator broadcasts
+        // it and admits it once the node has it, with no block between
         final depositOutpoint = c.svc.getOutpoint(covenant.hash, outputIndex: ShieldedPoolTool.depositVout);
 
         // what the wallet's replies folder holds besides submission replies,
@@ -342,8 +342,16 @@ ${signals == null ? '' : '  publish_interval_seconds: 10'}
 
         // ---- round 1: the deposit and three padding transfers
         final d = c.f.transfers1[0];
+        mining = false;
+        final heightAtDeposit = await node.height();
+        expect(await node.statusOf(covenant.id), TxStatus.unknown, reason: 'nobody has broadcast the covenant');
+        final depositReply = await submit(ShieldedTransfer(d.publics, d.proof, d.bundle, depositOutpoint: depositOutpoint), depositTx: covenant);
+        expect(depositReply.isAccepted, isTrue, reason: '$depositReply');
+        expect(await node.height(), heightAtDeposit, reason: 'admitted with no block mined between the submission and the reply');
+        expect(await node.statusOf(covenant.id), TxStatus.seen, reason: 'the coordinator broadcast it');
+        mining = true;
         final replies1 = [
-          await submit(ShieldedTransfer(d.publics, d.proof, d.bundle, depositOutpoint: depositOutpoint), depositTx: covenant),
+          depositReply,
           for (final t in c.f.transfers1.sublist(1)) await submit(t),
         ];
         for (final r in replies1) {

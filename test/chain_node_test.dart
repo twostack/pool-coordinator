@@ -34,6 +34,7 @@ void main() {
       expect(await chain.fetch('00' * 32), isNull, reason: 'an unknown txid is null, not an error');
       expect(await chain.minedHeight('00' * 32), isNull);
       expect(await chain.unspent('00' * 32, 0), isFalse);
+      expect(await chain.statusOf('00' * 32), TxStatus.unknown, reason: 'a transaction never sent');
 
       // coins from the node, mined
       final funded = await chain.payFromNode(addr, BigInt.from(100000));
@@ -59,11 +60,17 @@ void main() {
           .build(false);
       expect(await chain.broadcast(spend), 'node');
       expect(await chain.minedHeight(spend.id), isNull, reason: 'in the mempool, not mined');
+      expect(await chain.statusOf(spend.id), TxStatus.seen);
+      // broadcast again while in the mempool: the node's "already known" is acceptance, unmined
+      expect(await broadcastSeen(chain, spend), TxStatus.seen);
       expect(await chain.unspent(funded, vout), isFalse, reason: 'gettxout sees the mempool spend');
       await chain.generate(1);
       final spentAt = await chain.minedHeight(spend.id);
       expect(spentAt, isNotNull, reason: 'mined by the block we just generated');
       expect(spentAt, greaterThan(await chain.minedHeight(funded) ?? h0));
+      expect(await chain.statusOf(spend.id), TxStatus.mined);
+      // broadcast again once mined: accepted, and said to be mined
+      expect(await broadcastSeen(chain, spend), TxStatus.mined);
       expect(await chain.unspent(spend.id, 0), isTrue);
       expect((await chain.unspentOf(addr)).map((u) => u.outpoint), contains('${spend.id}:0'));
       expect((await chain.unspentOf(addr)).firstWhere((u) => u.txid == spend.id).height, spentAt);

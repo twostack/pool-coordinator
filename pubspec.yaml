@@ -9,7 +9,7 @@ environment:
 dependencies:
   # Development builds against sibling checkouts through
   # pubspec_overrides.yaml (see pubspec_overrides.yaml.example).
-  tstokenlib: ^2.0.1
+  tstokenlib: ">=2.0.2 <2.1.0"
   ricochet: ^0.1.0
   dart_libp2p: ^2.0.0
   dartsv: ^3.1.0
