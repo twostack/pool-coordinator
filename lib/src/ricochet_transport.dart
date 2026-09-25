@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:dart_libp2p/config/config.dart' as p2p_config;
+import 'package:dart_libp2p/config/defaults.dart' as p2p_defaults;
 import 'package:dart_libp2p/core/crypto/ed25519.dart' as crypto_ed25519;
 import 'package:dart_libp2p/core/crypto/keys.dart';
 import 'package:dart_libp2p/core/multiaddr.dart';
@@ -150,6 +151,11 @@ class RicochetTransport implements PoolTransport {
 
   /// A host with UDX, Noise and yamux and nothing else: no relay, no DHT,
   /// no NAT traversal, since the server is one configured address.
+  ///
+  /// The config is built by hand rather than through `Libp2p.new_`, whose
+  /// defaults switch AutoNAT on after the options are applied. Its dial-back
+  /// probes ended with the host closing its only connection to the server
+  /// (testnet, 2026-09-25), so AutoNAT and hole punching are off here.
   static Future<BasicHost> _createHost(KeyPair keyPair) async {
     final connMgr = ConnectionManager(idleTimeout: const Duration(seconds: 60));
     final udx = UDXTransport(connManager: connMgr);
@@ -171,7 +177,12 @@ class RicochetTransport implements PoolTransport {
       }),
       p2p_config.Libp2p.listenAddrs([MultiAddr('/ip4/0.0.0.0/udp/0/udx')]),
     ];
-    return await p2p_config.Libp2p.new_(options) as BasicHost;
+    final config = p2p_config.Libp2p.newConfig();
+    await config.apply(options);
+    await p2p_defaults.applyDefaults(config);
+    config.enableAutoNAT = false;
+    config.enableHolePunching = false;
+    return await config.newNode() as BasicHost;
   }
 
   /// Dials the server again, for a retry after it went away and came back,
@@ -194,13 +205,20 @@ class RicochetTransport implements PoolTransport {
 
   /// Runs [fn] on a fresh stream to the server of [protocol], closed after.
   Future<T> _stream<T>(String protocol, Future<T> Function(P2PStream stream) fn) async {
-    final P2PStream stream;
+    P2PStream stream;
     try {
-      stream = await host.newStream(serverId, [protocol], core_context.Context()).timeout(connectionTimeout);
+      stream = await _open(protocol);
     } on StateError catch (e) {
       if (!'$e'.contains('Maximum streams')) rethrow;
       await recycle();
-      return _stream(protocol, fn);
+      stream = await _open(protocol);
+    } catch (e) {
+      // any other failure to open a stream, the connection gone and its
+      // address with it among them: dial again, which re-adds the address,
+      // and try once more
+      log.fine('open a stream: $e; dialling the server again');
+      await reconnect();
+      stream = await _open(protocol);
     }
     try {
       return await fn(stream).timeout(messageTimeout);
@@ -212,6 +230,9 @@ class RicochetTransport implements PoolTransport {
       }
     }
   }
+
+  Future<P2PStream> _open(String protocol) =>
+      host.newStream(serverId, [protocol], core_context.Context()).timeout(connectionTimeout);
 
   /// Closes the connection to the server and dials it again. A connection
   /// that refuses new streams is the one failure a redial reliably clears,
