@@ -53,6 +53,11 @@ export interface PoolSummary {
   roundDeadlineSeconds: number;
   publishIntervalSeconds: number;
   live: LiveState;
+  /**
+   * What a wallet needs to join the pool, or null when the operator has not
+   * named it. Left unknown here: `pool-connect` checks it before showing it.
+   */
+  wallet?: unknown;
 }
 
 export interface RoundsPage {

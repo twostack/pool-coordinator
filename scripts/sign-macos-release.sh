@@ -106,7 +106,7 @@ ran=$(cd / && "$work/check/$name/bin/pool-coordinator" --version 2>&1) || die "m
 
 step "into $tag: the image in place of the tarball, and SHA256SUMS"
 (cd "$work" && { grep -v " ${tarball}\$" SHA256SUMS; shasum -a 256 "$image"; } | sort -k2 > SHA256SUMS.new && mv SHA256SUMS.new SHA256SUMS)
-[ "$(wc -l < "$work/SHA256SUMS" | tr -d ' ')" -eq 3 ] || die "SHA256SUMS should list three files: $(cat "$work/SHA256SUMS")"
+[ "$(wc -l < "$work/SHA256SUMS" | tr -d ' ')" -eq 4 ] || die "SHA256SUMS should list four files: $(cat "$work/SHA256SUMS")"
 (cd "$work" && grep " ${image}\$" SHA256SUMS | shasum -a 256 -c -)
 cat "$work/SHA256SUMS"
 gh release upload "$tag" "$work/$image" "$work/SHA256SUMS" --clobber

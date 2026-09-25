@@ -49,15 +49,24 @@ const catchUpPage = 100;
 const catchUpPages = 10;
 const defaultInterval = 30;
 
-/** Fetches through the browser, bounded so a hung coordinator never piles requests up. */
-export function browserDeps(origin = ''): FeedDeps {
+/**
+ * Fetches through the browser, bounded so a hung coordinator never piles
+ * requests up. The feed names its routes under `/api`; [base] is where the
+ * API actually is (`/api` beside a colocated proxy, `/api/testnet` on the
+ * edge site), and every request goes there instead.
+ */
+export function browserDeps(base = '/api'): FeedDeps {
+  const at = (path: string): string => {
+    if (path !== '/api' && !path.startsWith('/api/') && !path.startsWith('/api?')) throw new Error(`${path} is not an API route`);
+    return base.replace(/\/+$/, '') + path.slice('/api'.length);
+  };
   return {
     async get(path) {
-      const r = await fetch(origin + path, { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } });
+      const r = await fetch(at(path), { signal: AbortSignal.timeout(10_000), headers: { accept: 'application/json' } });
       if (!r.ok) throw new Error(`${path} answered ${r.status}`);
       return r.json();
     },
-    events: (path) => new EventSource(origin + path),
+    events: (path) => new EventSource(at(path)),
   };
 }
 

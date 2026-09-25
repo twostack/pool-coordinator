@@ -22,6 +22,8 @@ export class PoolChart extends LitElement {
     css`
       :host {
         display: block;
+        font-family: var(--pool-font);
+        color: var(--pool-text);
         min-inline-size: 0;
       }
       figure {

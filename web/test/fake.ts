@@ -67,6 +67,8 @@ export class FakeApi implements FeedDeps {
   network = 'test';
   explorer: 'main' | 'test' | null = 'test';
   interval = 30;
+  /** `/api/pool`'s `wallet`: null until a test names one. */
+  wallet: unknown = null;
   statsOver: Partial<PoolStats> = {};
   /** When false every request fails, as if the coordinator stopped answering. */
   answering = true;
@@ -108,6 +110,7 @@ export class FakeApi implements FeedDeps {
           roundDeadlineSeconds: 600,
           publishIntervalSeconds: this.interval,
           live: this.live,
+          wallet: this.wallet,
         } satisfies PoolSummary & { v: 1 };
       case '/api/rounds': {
         const before = Number(url.searchParams.get('before') ?? Infinity);

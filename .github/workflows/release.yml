@@ -44,11 +44,25 @@ jobs:
           npm run lint
           npm test
           npm run build
+      # the elements as a package for other pages, checked in a host page
+      # that installs the packed tarball (e2e/host.spec.ts)
+      - name: Pack and check pool-elements
+        working-directory: web
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test e2e/host.spec.ts
+          node scripts/pack-elements.mjs ../elements
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: web-dist
           path: web/dist
           retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-elements
+          path: elements/pool-elements-*.tgz
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     needs: web
@@ -154,7 +168,7 @@ jobs:
         run: |
           ls -l
           files=(*)
-          test "${#files[@]}" -eq 3
+          test "${#files[@]}" -eq 4
           for f in "${files[@]}"; do
             size=$(stat -c %s "$f")
             if [ "$size" -ge $((40 * 1024 * 1024)) ]; then echo "::error::$f is $size bytes, over 40 MB"; exit 1; fi

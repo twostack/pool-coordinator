@@ -23,6 +23,8 @@ export class PoolDashboard extends LitElement {
   static override styles = css`
     :host {
       display: block;
+      font-family: var(--pool-font);
+      color: var(--pool-text);
       max-inline-size: 72rem;
       margin: 0 auto;
       padding: 1rem;

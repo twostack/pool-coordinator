@@ -1,12 +1,13 @@
 # Releasing pool-coordinator
 
-A release is four files on a GitHub release of `twostack/pool-coordinator`:
+A release is five files on a GitHub release of `twostack/pool-coordinator`:
 
 | File | Built by | Where |
 |---|---|---|
 | `pool-coordinator_X.Y.Z_amd64.deb` | the release workflow | GitHub's `ubuntu-22.04` runner |
 | `pool-coordinator_X.Y.Z_arm64.deb` | the release workflow | GitHub's `ubuntu-22.04-arm` runner |
 | `pool-coordinator-X.Y.Z-macos-arm64.dmg` | `scripts/sign-macos-release.sh` | your Mac, from the tarball the `macos-14` runner built |
+| `pool-elements-X.Y.Z.tgz` | the release workflow (`web/scripts/pack-elements.mjs`) | GitHub's `ubuntu-22.04` runner, after the host-page checks |
 | `SHA256SUMS` | both, rewritten by the script | |
 
 The workflow builds, tests and smoke-tests every package from the tag, then leaves the release as a draft. The macOS disk image is made on a Mac that holds the Developer ID certificate, because signing secrets are never stored on GitHub. The script that makes it also publishes the draft.
