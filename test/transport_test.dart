@@ -261,5 +261,35 @@ void main() async {
       expect(replies, hasLength(1));
       await coordinator.delivered([got.single.id]);
     }, timeout: const Timeout(Duration(minutes: 3)));
+
+    test('no AutoNAT: the host runs no dial-back service that could drop the server\'s connection', () {
+      expect(coordinator.host.autoNATService, isNull);
+    });
+
+    test('the connection closed and the server\'s address forgotten: the next drain dials again and receives', () async {
+      final submission = PoolSubmission(id(), [7, 7]).encode();
+      await wallet.submit(coordinator.peerId, submission);
+      // what AutoNAT did on testnet: the only connection closed, and the
+      // address gone from the peerstore with it, so a plain newStream finds
+      // no address to dial. Before the fix every drain then failed the
+      // same way, for hours; now the one drain dials again and receives.
+      await coordinator.host.network.closePeer(coordinator.serverId);
+      await coordinator.host.peerStore.addrBook.clearAddrs(coordinator.serverId);
+      expect(await coordinator.host.peerStore.addrBook.addrs(coordinator.serverId), isEmpty);
+      final got = await coordinator.drain();
+      expect(got, hasLength(1));
+      expect(got.single.payload, submission);
+      await coordinator.delivered([got.single.id]);
+      // and a send in the other direction, after the same loss
+      await coordinator.host.network.closePeer(coordinator.serverId);
+      await coordinator.host.peerStore.addrBook.clearAddrs(coordinator.serverId);
+      await coordinator.reply(wallet.peerId, PoolReply.accepted(PoolSubmission.idOf(submission)!, 2).encode());
+      List<InboxMessage> replies = const [];
+      for (int i = 0; i < 20 && replies.isEmpty; i++) {
+        replies = await wallet.readReplies();
+        if (replies.isEmpty) await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+      expect(replies, hasLength(1));
+    }, timeout: const Timeout(Duration(minutes: 2)));
   }, skip: skip);
 }
