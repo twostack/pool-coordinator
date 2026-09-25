@@ -57,6 +57,7 @@ export class PoolDashboard extends LitElement {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
       gap: 0.75rem;
+      margin-top: 0.75rem;
     }
     pool-chart {
       display: block;
