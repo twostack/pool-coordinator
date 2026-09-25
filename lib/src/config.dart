@@ -61,7 +61,24 @@ class WalletConfig {
 
   /// Below this many rounds left, the server logs a warning.
   final int warnRoundsLeft;
-  const WalletConfig({required this.file, this.passphraseFile, this.warnRoundsLeft = 5});
+
+  /// The store of ready coins funding requests are served from.
+  final CoinsConfig coins;
+  const WalletConfig({required this.file, this.passphraseFile, this.warnRoundsLeft = 5, this.coins = const CoinsConfig()});
+}
+
+/// The coin pool's settings (`wallet.coins`): the smallest coin a request
+/// is served from, how many ready coins the wallet keeps, the count below
+/// which it splits more, and the most outputs one split makes.
+class CoinsConfig {
+  /// The most outputs one split makes, whatever the configuration says.
+  static const maxSplitOutputs = 100;
+
+  final int floor;
+  final int target;
+  final int lowWater;
+  final int splitMaxOutputs;
+  const CoinsConfig({this.floor = 10000, this.target = 30, this.lowWater = 12, this.splitMaxOutputs = maxSplitOutputs});
 }
 
 class StoreConfig {
@@ -99,11 +116,22 @@ class ServerConfig {
   /// long a funding output is waited for.
   final Duration minedPoll;
   final Duration fundingTimeout;
+
+  /// Rounds published and not yet mined at which the next round's funding
+  /// waits, keeping the pool's unconfirmed chain inside the ancestor limits
+  /// of the chain it publishes to.
+  final int maxUnminedRounds;
+
+  /// Blocks past a round's publication after which it is broadcast again,
+  /// funding first, when it is still unmined.
+  final int rebroadcastAfterBlocks;
   const ServerConfig({
     this.pollInterval = const Duration(seconds: 2),
     this.statusFile = 'status.json',
     this.minedPoll = const Duration(seconds: 2),
     this.fundingTimeout = const Duration(hours: 1),
+    this.maxUnminedRounds = 10,
+    this.rebroadcastAfterBlocks = 3,
   });
 }
 
@@ -122,13 +150,73 @@ class ApiConfig {
   final String metricsFile;
   final Duration publishInterval;
   final int maxSubscribers;
+
+  /// What wallets are told to join the pool with, or null when the operator
+  /// has not named it.
+  final WalletConnect? wallet;
   const ApiConfig({
     required this.bind,
     required this.port,
     required this.metricsFile,
     required this.publishInterval,
     required this.maxSubscribers,
+    this.wallet,
   });
+}
+
+/// What a wallet needs to join the pool that the coordinator cannot work
+/// out for itself: the ricochet server as wallets reach it (the
+/// coordinator's own `ricochet.server` may be loopback), chain peers a
+/// wallet's header sync can use, and an ARC endpoint that needs no key.
+/// Served on `/api/pool` and shown by the page as a command and a config
+/// file to paste, so every value is held to a closed grammar here.
+class WalletConnect {
+  static const maxPeers = 8;
+
+  final String server;
+  final List<String> peers;
+  final Uri? arcUrl;
+  const WalletConnect({required this.server, this.peers = const [], this.arcUrl});
+
+  static final _peerId = RegExp(r'^[1-9A-HJ-NP-Za-km-z]{46,60}$');
+  static final _serverShape = RegExp(r'^/(ip4|ip6)/([^/]+)/udp/([0-9]{1,5})/udx/p2p/([^/]+)$');
+  static final _ip4 = RegExp(r'^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$');
+  static final _ip6 = RegExp(r'^[0-9A-Fa-f:.]{2,45}$');
+  static final _hostName = RegExp(r'^(?=.{1,253}$)[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})*$');
+  static final _arc = RegExp(r'^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$');
+
+  static bool _port(String p) {
+    final n = int.tryParse(p);
+    return n != null && n >= 1 && n <= 65535 && p == '$n';
+  }
+
+  /// The peer id at the end of [multiaddr], or null.
+  static String? peerIdOf(String multiaddr) => RegExp(r'/p2p/([^/]+)$').firstMatch(multiaddr)?.group(1);
+
+  /// Why [s] is not a server address a wallet can dial, or null when it is.
+  static String? serverProblem(String s) {
+    if (s.startsWith('/dns')) return '"$s" is a name; wallets dial only /ip4 or /ip6 addresses';
+    final m = _serverShape.firstMatch(s);
+    if (m == null) return '"$s" is not /ip4|/ip6/<address>/udp/<port>/udx/p2p/<peer id>';
+    final ok = m.group(1) == 'ip4' ? _ip4.hasMatch(m.group(2)!) : _ip6.hasMatch(m.group(2)!) && m.group(2)!.contains(':');
+    if (!ok) return '"${m.group(2)}" is not an ${m.group(1)} address';
+    if (!_port(m.group(3)!)) return '${m.group(3)} is not a port';
+    if (!_peerId.hasMatch(m.group(4)!)) return '"${m.group(4)}" is not a peer id';
+    return null;
+  }
+
+  /// Why [s] is not `host:port`, or null when it is.
+  static String? peerProblem(String s) {
+    final i = s.lastIndexOf(':');
+    if (i < 1) return '"$s" is not host:port';
+    final host = s.substring(0, i), port = s.substring(i + 1);
+    if (!_ip4.hasMatch(host) && !_hostName.hasMatch(host)) return '"$host" is not an IPv4 address or host name';
+    if (!_port(port)) return '"$port" is not a port';
+    return null;
+  }
+
+  /// Why [s] is not an ARC URL to hand a wallet, or null when it is.
+  static String? arcProblem(String s) => _arc.hasMatch(s) ? null : '"$s" is not an https URL of plain characters';
 }
 
 /// The server's configuration: one YAML file, with the secrets elsewhere.
@@ -221,10 +309,30 @@ class PoolConfig {
     r.done();
 
     final w = root.section('wallet');
+    var coins = const CoinsConfig();
+    if (w.has('coins')) {
+      final co = w.section('coins');
+      coins = CoinsConfig(
+        floor: co.integer('floor', 10000),
+        target: co.integer('target', 30),
+        lowWater: co.integer('low_water', 12),
+        splitMaxOutputs: co.integer('split_max_outputs', CoinsConfig.maxSplitOutputs),
+      );
+      co.done();
+      if (coins.floor < 1) throw ConfigError('wallet.coins.floor', 'must be at least 1 satoshi');
+      if (coins.target < 1) throw ConfigError('wallet.coins.target', 'must be at least 1 coin');
+      if (coins.lowWater < 0 || coins.lowWater > coins.target) {
+        throw ConfigError('wallet.coins.low_water', 'is ${coins.lowWater}; it is from 0 to the target, ${coins.target}');
+      }
+      if (coins.splitMaxOutputs < 2 || coins.splitMaxOutputs > CoinsConfig.maxSplitOutputs) {
+        throw ConfigError('wallet.coins.split_max_outputs', 'is ${coins.splitMaxOutputs}; it is from 2 to ${CoinsConfig.maxSplitOutputs}');
+      }
+    }
     final wallet = WalletConfig(
         file: path(w.string('file')),
         passphraseFile: w.optionalString('passphrase_file')?.let(path),
-        warnRoundsLeft: w.integer('warn_rounds_left', 5));
+        warnRoundsLeft: w.integer('warn_rounds_left', 5),
+        coins: coins);
     w.done();
 
     final s = root.section('store');
@@ -256,7 +364,11 @@ class PoolConfig {
         statusFile: path(sv.string('status_file', 'status.json')),
         minedPoll: Duration(milliseconds: sv.integer('mined_poll_ms', 2000)),
         fundingTimeout: Duration(seconds: sv.integer('funding_timeout_seconds', 3600)),
+        maxUnminedRounds: sv.integer('max_unmined_rounds', 10),
+        rebroadcastAfterBlocks: sv.integer('rebroadcast_after_blocks', 3),
       );
+      if (server.maxUnminedRounds < 1) throw ConfigError('server.max_unmined_rounds', 'must be at least 1');
+      if (server.rebroadcastAfterBlocks < 1) throw ConfigError('server.rebroadcast_after_blocks', 'must be at least 1');
       sv.done();
     } else {
       server = ServerConfig(statusFile: path('status.json'));
@@ -281,9 +393,20 @@ class PoolConfig {
       }
       final maxSubscribers = a.integer('max_subscribers', 200);
       if (maxSubscribers < 1) throw ConfigError('api.max_subscribers', 'must be at least 1');
+      WalletConnect? walletConnect;
+      if (a.has('wallet')) {
+        if (!enabled) throw ConfigError('api.wallet', 'is set while the API is disabled, so no wallet would be told');
+        walletConnect = _walletConnect(a.section('wallet'), ricochet.server);
+      }
       a.done();
       if (enabled) {
-        api = ApiConfig(bind: bind, port: port, metricsFile: metricsFile, publishInterval: interval, maxSubscribers: maxSubscribers);
+        api = ApiConfig(
+            bind: bind,
+            port: port,
+            metricsFile: metricsFile,
+            publishInterval: interval,
+            maxSubscribers: maxSubscribers,
+            wallet: walletConnect);
       }
     }
     root.done();
@@ -340,6 +463,31 @@ class Secrets {
   }
 }
 
+WalletConnect _walletConnect(_Section wc, String ricochetServer) {
+  final server = wc.string('server');
+  final problem = WalletConnect.serverProblem(server);
+  if (problem != null) throw ConfigError('api.wallet.server', problem);
+  final ours = WalletConnect.peerIdOf(ricochetServer);
+  if (WalletConnect.peerIdOf(server) != ours) {
+    throw ConfigError('api.wallet.server', 'names peer ${WalletConnect.peerIdOf(server)}, and ricochet.server is $ours');
+  }
+  final peers = wc.stringList('peers');
+  if (peers.length > WalletConnect.maxPeers) {
+    throw ConfigError('api.wallet.peers', 'names ${peers.length}; the most is ${WalletConnect.maxPeers}');
+  }
+  for (final p in peers) {
+    final why = WalletConnect.peerProblem(p);
+    if (why != null) throw ConfigError('api.wallet.peers', why);
+  }
+  final arc = wc.optionalString('arc_url');
+  if (arc != null) {
+    final why = WalletConnect.arcProblem(arc);
+    if (why != null) throw ConfigError('api.wallet.arc_url', why);
+  }
+  wc.done();
+  return WalletConnect(server: server, peers: peers, arcUrl: arc == null ? null : Uri.parse(arc));
+}
+
 /// One map of the file, reading fields by name and refusing what is left.
 class _Section {
   final String prefix;
@@ -367,6 +515,17 @@ class _Section {
   }
 
   String? optionalString(String key) => has(key) ? string(key) : null;
+
+  /// A list of values, empty when absent.
+  List<String> stringList(String key) {
+    final v = _take(key);
+    if (v == null) return const [];
+    if (v is! YamlList) throw ConfigError(_path(key), 'is not a list');
+    return [
+      for (final x in v)
+        if (x is String || x is num) '$x' else throw ConfigError(_path(key), 'holds something that is not a value')
+    ];
+  }
 
   bool boolean(String key, bool fallback) {
     final v = _take(key);

@@ -17,13 +17,16 @@ class StoreRefusal implements Exception {
   String toString() => 'round $round, $file: $reason';
 }
 
-/// One round as the store holds it: the three transactions, and the
-/// ledger's snapshot after them when it has not been pruned.
+/// One round as the store holds it: the three transactions, the funding
+/// transactions they spend that the wallet built (empty for a round stored
+/// before record version 2), and the ledger's snapshot after them when it
+/// has not been pruned.
 class StoredRound {
   final int number;
   final Transaction y, round, witness;
   final Uint8List? snapshot;
-  const StoredRound(this.number, this.y, this.round, this.witness, this.snapshot);
+  final List<Transaction> funding;
+  const StoredRound(this.number, this.y, this.round, this.witness, this.snapshot, {this.funding = const []});
 
   ShieldedRoundTxs get triple => (round: round, witness: witness, nextSlot: y);
 }
@@ -33,6 +36,17 @@ class StoredRound {
 /// back at start. [roundBuilt] is the library's call; the rest is what
 /// recovery needs: the last round's number, and any round by number.
 abstract class RoundStore implements CoordinatorStore {
+  /// Stores round [number] as [roundBuilt] does, with [funding]: the
+  /// transactions Y, the round and the witness spend that the wallet built
+  /// and the chain may not have mined, so they can be broadcast again
+  /// before the round. The server calls it through [FundedStore].
+  Future<void> roundBuiltWith(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot,
+      {List<Transaction> funding = const []});
+
+  @override
+  Future<void> roundBuilt(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot) =>
+      roundBuiltWith(number, y, round, witness, snapshot);
+
   /// The highest round number stored, or null when the store is empty.
   Future<int?> lastNumber();
 
@@ -64,4 +78,18 @@ abstract class RoundStore implements CoordinatorStore {
     final n = await lastNumber();
     return n == null ? null : read(n);
   }
+}
+
+/// The store as the library sees it, with each round's funding asked of
+/// the wallet and stored beside it. Kept apart from the store itself so
+/// the store holds no closure over the wallet: a store is read in a worker
+/// isolate, and a wallet cannot be sent to one.
+class FundedStore implements CoordinatorStore {
+  final RoundStore store;
+  final List<Transaction> Function(List<Transaction> spenders) fundingOf;
+  FundedStore(this.store, this.fundingOf);
+
+  @override
+  Future<void> roundBuilt(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot) =>
+      store.roundBuiltWith(number, y, round, witness, snapshot, funding: fundingOf([y, round, witness]));
 }

@@ -49,6 +49,8 @@ void main() {
       final found = await chain.unspentOf(addr);
       expect(found.map((u) => u.outpoint), contains('$funded:$vout'));
       expect(found.firstWhere((u) => u.txid == funded).satoshis, BigInt.from(100000));
+      expect(found.firstWhere((u) => u.txid == funded).height, await chain.minedHeight(funded),
+          reason: 'the height listunspent\'s confirmations give is the one the block has');
 
       // spend it back to ourselves through sendrawtransaction
       final spend = (TransactionBuilder()
@@ -64,6 +66,7 @@ void main() {
       expect(spentAt, greaterThan(await chain.minedHeight(funded) ?? h0));
       expect(await chain.unspent(spend.id, 0), isTrue);
       expect((await chain.unspentOf(addr)).map((u) => u.outpoint), contains('${spend.id}:0'));
+      expect((await chain.unspentOf(addr)).firstWhere((u) => u.txid == spend.id).height, spentAt);
 
       // the node's refusal is a refusal with its reason
       expect(() => chain.broadcast(spend),

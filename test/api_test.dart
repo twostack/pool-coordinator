@@ -29,7 +29,7 @@ void main() {
   late PoolApi api;
   const interval = Duration(seconds: 30);
 
-  Future<void> startApi({int maxSubscribers = 200, Duration heartbeat = const Duration(seconds: 15)}) async {
+  Future<void> startApi({int maxSubscribers = 200, Duration heartbeat = const Duration(seconds: 15), WalletFacts? wallet}) async {
     gate = PublicationGate(recorder, interval: interval, clock: clock);
     api = await PoolApi.start(
       config: ApiConfig(
@@ -46,7 +46,8 @@ void main() {
           witness0: c.w0.id,
           slot0: c.y0.tx.id,
           roundDeadline: const Duration(minutes: 10),
-          explorer: 'test'),
+          explorer: 'test',
+          wallet: wallet),
       source: recorder,
       gate: gate,
       heartbeat: heartbeat,
@@ -121,6 +122,35 @@ void main() {
       expect(pool['roundDeadlineSeconds'], 600);
       expect(pool['publishIntervalSeconds'], 30);
       expect(pool['live'], containsPair('assembling', false));
+    });
+
+    test('what a wallet needs: the server, the peers and the ARC URL as named, the coordinator\'s own peer id, cloak\'s network name', () async {
+      const server = '/ip4/139.59.159.19/udp/55223/udx/p2p/12D3KooWFuA6F9bBybjmQ6ZWUd9hKK4GXHXGTnyY11zAXA1gbeu7';
+      const coordinator = '12D3KooWG1BX6cWMmpR5wVCWyST5HCa5WmeVoCcZpFss4pzv8TSY';
+      await startApi(
+          wallet: const WalletFacts(
+              network: 'testnet',
+              server: server,
+              coordinator: coordinator,
+              peers: ['198.154.93.206:18333', '51.79.25.225:18333'],
+              arcUrl: 'https://testnet.arc.gorillapool.io/v1'));
+      final pool = await getJson(api.port, '/api/pool');
+      expect(pool['wallet'], {
+        'network': 'testnet',
+        'server': server,
+        'coordinator': coordinator,
+        'peers': ['198.154.93.206:18333', '51.79.25.225:18333'],
+        'arcUrl': 'https://testnet.arc.gorillapool.io/v1',
+      });
+      expect(pool['v'], 1);
+    });
+
+    test('not named: wallet is null and the rest is as before', () async {
+      await startApi();
+      final pool = await getJson(api.port, '/api/pool');
+      expect(pool.containsKey('wallet'), isTrue);
+      expect(pool['wallet'], isNull);
+      expect(pool['network'], 'test');
     });
 
     test('stats and series answer from the history, with a dash-worthy null where nothing is known', () async {

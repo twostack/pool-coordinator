@@ -68,6 +68,13 @@ void main() {
     final found = await chain.unspentOf(addr);
     expect(found.map((u) => u.satoshis.toInt()), [50000, 13999000], reason: 'the one spent in the mempool is left out');
     expect(found[0].outpoint, '99845fd840ad2cc4d6f93fafb8b072d188821f55d9298772415175c456f3077d:0');
+    expect(found.map((u) => u.height), [280589, 554588], reason: 'the heights WhatsOnChain names');
+    // an output in the mempool has no height yet
+    fake.routes['/woc/v1/bsv/test/address/${addr.toBase58()}/unspent/all'] = (_) => Answer(200,
+        '{"address":"x","script":"y","result":[{"height":0,"tx_pos":1,"tx_hash":"${'22' * 32}","value":700,"isSpentInMempoolTx":false,"status":"unconfirmed"}]}');
+    final pending = (await chain.unspentOf(addr)).single;
+    expect(pending.height, isNull);
+    expect(pending.satoshis, BigInt.from(700));
     expect(fake.requests.map((r) => r.path), contains('/woc/v1/bsv/test/chain/info'));
   });
 

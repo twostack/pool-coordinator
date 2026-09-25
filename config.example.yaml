@@ -43,6 +43,18 @@ wallet:
   # passphrase_file: /etc/pool/wallet.passphrase
   # Log a warning when the wallet can pay for fewer rounds than this.
   warn_rounds_left: 5
+  # The store of ready coins each funding request is served from, so no
+  # request waits for a block. Coins are split from larger ones ahead of
+  # time, with amounts that follow Benford's law.
+  coins:
+    # the smallest coin a request is served from, in satoshis
+    floor: 10000
+    # the ready coins the wallet keeps: about ten rounds' worth
+    target: 30
+    # below this many, ready or on their way, it splits more
+    low_water: 12
+    # the most outputs one split makes; at most 100
+    split_max_outputs: 100
 
 store:
   directory: store
@@ -71,8 +83,15 @@ server:
   status_file: status.json
   # How often the chain is asked whether a transaction is mined.
   mined_poll_ms: 2000
-  # How long a funding transaction is waited for before the round fails.
+  # How long a funding request waits for a ready coin before the round fails.
   funding_timeout_seconds: 3600
+  # Rounds published and not yet mined at which the next round waits for
+  # one to be mined, so the pool's unconfirmed chain stays inside the
+  # ancestor limits of ARC and the node.
+  max_unmined_rounds: 10
+  # Blocks after which a round still unmined is broadcast again, its
+  # funding first.
+  rebroadcast_after_blocks: 3
 
 # The read-only API a public landing page reads: the pool's rounds, its
 # statistics and the live state of the round being built. Off unless
@@ -88,3 +107,14 @@ server:
 #   # most this often; at least 10.
 #   publish_interval_seconds: 30
 #   max_subscribers: 200
+#   # What wallets are told to join the pool with, shown on the page as a
+#   # `cloak init` command and a config file. Leave it out to show nothing.
+#   # wallet:
+#   #   # the ricochet server as wallets reach it: its public /ip4 or /ip6
+#   #   # address (wallets cannot dial a DNS name), with ricochet.server's peer id
+#   #   server: /ip4/203.0.113.7/udp/55223/udx/p2p/12D3KooW...
+#   #   # chain peers, as host:port, that a wallet's header sync can use; at most 8
+#   #   peers:
+#   #     - 198.154.93.206:18333
+#   #   # an ARC endpoint a wallet on this network can use without a key
+#   #   arc_url: https://testnet.arc.gorillapool.io/v1

@@ -28,14 +28,43 @@ void main() {
     ..addInput(TransactionInput(hex.encode(List.filled(32, n)), 0, TransactionInput.MAX_SEQ_NUMBER))
     ..addOutput(TransactionOutput(BigInt.from(sats), P2PKHLockBuilder.fromAddress(addr).getScriptPubkey()));
 
-  Future<(FileWallet, FakeChain)> wallet({int sats = 100000, int feeRate = 1, List<WalletCoin>? coins}) async {
-    final chain = FakeChain();
-    final c = coin(1, sats);
-    chain.addMined(c);
-    final contents = WalletContents(ownerKey: key, network: NetworkType.TEST, coins: coins ?? [WalletCoin(c, 0)]);
+  /// A wallet holding [amounts] as mined coins (100,000 sat by default), on
+  /// a fake chain that mines only when told to, with the coin store's
+  /// settings [coins].
+  Future<(FileWallet, FakeChain)> wallet(
+      {List<int> amounts = const [100000],
+      int feeRate = 1,
+      CoinsConfig coins = const CoinsConfig(floor: 10000, target: 30, lowWater: 0),
+      Duration fundingTimeout = const Duration(seconds: 5)}) async {
+    final chain = FakeChain(height: 100)..mineOnBroadcast = false;
+    final held = <WalletCoin>[];
+    for (int i = 0; i < amounts.length; i++) {
+      final c = coin(1 + i, amounts[i]);
+      chain.addMined(c);
+      held.add(WalletCoin(c, 0, height: 100));
+    }
+    final contents = WalletContents(ownerKey: key, network: NetworkType.TEST, coins: held);
     final f = await WalletFile.create('${dir.path}/wallet.enc', 'open sesame', contents, kdf: kdf);
-    return (FileWallet(file: f, contents: contents, chain: chain, feeRate: feeRate, minedPoll: const Duration(milliseconds: 20)), chain);
+    return (
+      FileWallet(
+          file: f,
+          contents: contents,
+          chain: chain,
+          feeRate: feeRate,
+          coins: coins,
+          minedPoll: const Duration(milliseconds: 20),
+          fundingTimeout: fundingTimeout),
+      chain
+    );
   }
+
+  /// Serves requests as [kinds] says, in order: Y, the witness, the round.
+  void kinds(FileWallet w, List<FundingKind> kinds) {
+    var i = 0;
+    w.requestKind = () => kinds[i++ % kinds.length];
+  }
+
+  const roundOrder = [FundingKind.exact, FundingKind.exact, FundingKind.round];
 
   group('the wallet file', () {
     test('opens with its passphrase and refuses another, naming the file and not the key', () async {
@@ -108,135 +137,274 @@ void main() {
     });
   });
 
+  group('the wallet file, format 2', () {
+    test('an old wallet file: format 1 is read, one mined coin is ready and one unmined pending, and the file on disk is format 2', () async {
+      final chain = FakeChain(height: 100)..mineOnBroadcast = false;
+      final minedCoin = coin(21, 50000), unminedCoin = coin(22, 40000);
+      chain.addMined(minedCoin);
+      await chain.broadcast(unminedCoin);
+      // a format 1 file, as 0.1.0 wrote it: no heights, no splits
+      final v1 = {
+        'version': 1,
+        'network': 'test',
+        'ownerKey': key.toHex(),
+        'coins': [
+          {'tx': minedCoin.serialize(), 'vout': 0},
+          {'tx': unminedCoin.serialize(), 'vout': 0},
+        ],
+        'offered': [],
+        'lastRoundCost': '9818',
+        'balanceAtReconcile': '90000',
+      };
+      final path = '${dir.path}/old.enc';
+      final contents = WalletContents.fromJson(v1);
+      expect(contents.readFormat, 1);
+      expect(contents.coins.every((c) => !c.mined), isTrue, reason: 'heights unknown until asked');
+      final f = await WalletFile.create(path, 'p', contents, kdf: kdf);
+      final w = FileWallet(file: f, contents: contents, chain: chain, feeRate: 1, coins: const CoinsConfig(floor: 10000, lowWater: 0));
+      await w.reconcile();
+      expect(w.report.readyCoins, 1);
+      expect(w.report.pendingCoins, 1);
+      expect(w.report.readyValue, BigInt.from(50000));
+      expect(w.report.pendingValue, BigInt.from(40000));
+      expect(w.lastRoundCost, BigInt.from(9818));
+      final (_, back) = await WalletFile.open(path, 'p');
+      expect(back.readFormat, 2, reason: 'written back as format 2');
+      expect(back.coins.firstWhere((c) => c.txid == minedCoin.id).height, 100);
+    });
+
+    test('an unknown format is refused, naming it', () {
+      expect(() => WalletContents.fromJson({'version': 7, 'network': 'test', 'ownerKey': key.toHex(), 'coins': [], 'offered': []}),
+          throwsA(isA<FormatException>().having((e) => e.message, 'message', contains('format 7'))));
+    });
+
+    test('nothing in the clear in format 2: no run equal to the key, its public key, an outpoint or a split\'s txid', () async {
+      final (w, chain) = await wallet(amounts: [1000000], coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
+      await w.reconcile();
+      final split = w.contents.splits.single;
+      final bytes = File(w.file.path).readAsBytesSync();
+      final text = String.fromCharCodes(bytes);
+      for (final needle in [hex.decode(key.toHex()), hex.decode(key.publicKey.toHex()), hex.decode(split.id), split.hash, hex.decode(addr.pubkeyHash160)]) {
+        expect(_contains(bytes, needle), isFalse, reason: 'found ${hex.encode(needle)}');
+        expect(_contains(bytes, needle.reversed.toList()), isFalse);
+      }
+      expect(text, isNot(contains(split.id)));
+      expect(text, isNot(contains(split.serialize())));
+      expect(chain.broadcasts, [split.id]);
+    });
+  });
+
+  group('the coin store', () {
+    test('low water refills the store: one coin of 10,000,000 sat, target 30, low water 12, floor 10,000 gives one split of 30', () async {
+      final (w, chain) = await wallet(amounts: [10000000], coins: const CoinsConfig(floor: 10000, target: 30, lowWater: 12));
+      await w.reconcile();
+      final split = w.splitsBuilt.single;
+      expect(chain.broadcasts, [split.id]);
+      expect(split.inputs, hasLength(1));
+      expect(split.outputs, hasLength(30));
+      expect(split.outputs.every((o) => o.satoshis >= BigInt.from(10000)), isTrue);
+      expect(split.outputs.every((o) => FakeChain.paysPKH(o, addr.pubkeyHash160)), isTrue, reason: 'no change output: all pay the owner');
+      final fee = _feeOf(split, chain.known);
+      expect(split.outputs.fold(BigInt.zero, (a, o) => a + o.satoshis) + fee, BigInt.from(10000000));
+      expect(fee, BigInt.from(135), reason: 'the floor at 1 sat/kB for 30 outputs');
+      expect(w.report.readyCoins, 0);
+      expect(w.report.pendingCoins, 30);
+      // a second reconcile before the split is mined does not split again
+      await w.reconcile();
+      expect(chain.broadcasts, hasLength(1));
+    });
+
+    test('a split\'s outputs mature: pending until the reconcile after the mining, ready from then on', () async {
+      final (w, chain) = await wallet(amounts: [1000000], coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
+      await w.reconcile();
+      expect(w.report.pendingCoins, 10);
+      chain.mine();
+      expect(w.report.readyCoins, 0, reason: 'not until a reconcile has asked');
+      await w.reconcile();
+      expect(w.report.readyCoins, 10);
+      expect(w.report.pendingCoins, 0);
+      expect(w.contents.splits, isEmpty, reason: 'a mined split is forgotten');
+      expect(w.report.toJson()['ready'], {'coins': 10, 'value': w.report.readyValue.toString()});
+    });
+
+    test('a coin below the floor is never handed over, and is counted in the balance', () async {
+      final (w, chain) = await wallet(amounts: [9999, 30000]);
+      kinds(w, [FundingKind.round]);
+      final f = (await w.output(BigInt.from(500)))!;
+      expect(f.value, BigInt.from(30000), reason: 'the small coin is passed over');
+      expect(w.balance, BigInt.from(9999));
+      expect(w.report.readyCoins, 0);
+      await expectLater(w.output(BigInt.from(500)), throwsA(isA<WalletRefusal>()), reason: 'a coin under the floor serves nothing');
+    });
+
+    test('nothing big enough to split: no split, and the status says a top-up is needed', () async {
+      final (w, chain) = await wallet(amounts: [20100], coins: const CoinsConfig(floor: 10000, target: 30, lowWater: 12));
+      await w.reconcile();
+      expect(chain.broadcasts, isEmpty);
+      expect(w.report.needsTopUp, isTrue);
+    });
+
+    test('a split refused: the source is still ready, the reason is logged, the balance unchanged', () async {
+      final (w, chain) = await wallet(amounts: [1000000], coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
+      chain.refuse = (_) => 'too-long-mempool-chain';
+      final logs = <String>[];
+      final sub = w.log.onRecord.listen((r) => logs.add(r.message));
+      await w.reconcile();
+      await sub.cancel();
+      expect(chain.broadcasts, isEmpty);
+      expect(w.balance, BigInt.from(1000000));
+      expect(w.report.readyCoins, 1);
+      expect(w.contents.splits, isEmpty);
+      expect(logs.any((m) => m.contains('too-long-mempool-chain')), isTrue);
+      final (_, back) = await WalletFile.open(w.file.path, 'open sesame');
+      expect(back.coins.single.outpoint, '${chain.known.values.first.id}:0');
+    });
+
+    test('a crash before the split\'s broadcast: the next start broadcasts it once, and its outputs are pending', () async {
+      final (w, chain) = await wallet(amounts: [1000000], coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
+      // the process stops between the file's write and the broadcast
+      chain.beforeBroadcast = (_) async => throw const _Stopped();
+      await expectLater(w.reconcile(), throwsA(isA<_Stopped>()));
+      chain.beforeBroadcast = null;
+      expect(chain.broadcasts, isEmpty);
+      final (file, back) = await WalletFile.open(w.file.path, 'open sesame');
+      expect(back.splits, hasLength(1), reason: 'written before the broadcast');
+      final restarted = FileWallet(file: file, contents: back, chain: chain, feeRate: 1, coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
+      await restarted.reconcile();
+      expect(chain.broadcasts, [back.splits.single.id], reason: 'broadcast once');
+      expect(restarted.report.pendingCoins, 10);
+      await restarted.reconcile();
+      expect(chain.broadcasts, hasLength(1), reason: 'and not again');
+    });
+  });
+
   group('funding', () {
-    test('three outputs a round: exactly the values asked, each mined before it is handed over, along a change chain', () async {
-      final (w, chain) = await wallet(sats: 100000);
-      final asked = [BigInt.from(1784), BigInt.from(2205), BigInt.from(396 + 50)];
+    test('three outputs a round: exact values for Y and the witness, a whole coin for the round, each within 1 s, no block mined, every funding transaction over a mined coin', () async {
+      final (w, chain) = await wallet(amounts: [40000, 25000, 15000, 12000]);
+      kinds(w, roundOrder);
+      final heightBefore = await chain.height();
+      final asked = [BigInt.from(1784), BigInt.from(2205), BigInt.from(396 + 546)];
       final given = <FundingOutput>[];
       for (final v in asked) {
-        final f = (await w.output(v))!;
-        expect(f.value, v, reason: 'exactly the value asked');
-        expect(f.vout, 1, reason: 'the change comes first, as the issuance requires');
-        expect(FakeChain.paysPKH(f.tx.outputs[1], addr.pubkeyHash160), isTrue);
-        expect(await chain.minedHeight(f.tx.id), isNotNull, reason: 'mined before the library gets it');
-        given.add(f);
+        final sw = Stopwatch()..start();
+        given.add((await w.output(v))!);
+        expect(sw.elapsed, lessThan(const Duration(seconds: 1)));
       }
-      expect(w.built, hasLength(3));
-      expect(chain.broadcasts, w.built.map((t) => t.id));
-      // the change chain: each funding transaction spends the previous one's change
-      expect(w.built[1].inputs.single.prevTxnId, w.built[0].id);
-      expect(w.built[1].inputs.single.prevTxnOutputIndex, 0);
-      expect(w.built[2].inputs.single.prevTxnId, w.built[1].id);
-      final fees = w.built.map((t) => _feeOf(t, chain.known)).toList();
-      expect(fees, everyElement(BigInt.from(135)), reason: 'the floor at 1 sat/kB');
-      expect(w.balance, BigInt.from(100000 - 1784 - 2205 - 446 - 3 * 135));
-      expect(w.contents.offered.map((c) => c.outpoint), given.map((f) => '${f.tx.id}:1'));
-      // the record survives a reopen
-      final (_, back) = await WalletFile.open(w.file.path, 'open sesame');
-      expect(back.offered, hasLength(3));
-      expect(back.coins.single.satoshis, w.balance);
+      expect(await chain.height(), heightBefore, reason: 'no block was mined');
+      expect(given[0].value, asked[0]);
+      expect(given[1].value, asked[1]);
+      expect(given[0].vout, 1, reason: 'the change first, as the issuance requires');
+      // the smallest ready coin that covers each: 12,000 for Y, 15,000 for the witness, 25,000 for the round
+      expect(given[2].value, BigInt.from(25000), reason: 'the round is handed the coin whole');
+      expect(w.built, hasLength(2), reason: 'two funding transactions a round');
+      for (final t in w.built) {
+        expect(t.inputs, hasLength(1));
+        expect(await chain.minedHeight(t.inputs.single.prevTxnId), isNotNull, reason: 'spends a mined coin');
+        expect(_feeOf(t, chain.known), BigInt.from(135));
+      }
+      expect(w.report.readyCoins, 1, reason: 'the 40,000 coin is left');
+      expect(w.report.pendingCoins, 2, reason: 'the two funding transactions\' change');
     });
 
-    test('the wallet waits for the chain to mine the funding transaction', () async {
-      final (w, chain) = await wallet();
-      chain.mineOnBroadcast = false;
-      final sw = Stopwatch()..start();
-      final pending = w.output(BigInt.from(1000));
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+    test('a round funded from three coins, from a store of 30', () async {
+      final (w, chain) = await wallet(amounts: [for (int i = 0; i < 30; i++) 10000 + i * 1000]);
+      kinds(w, roundOrder);
+      for (final v in [1784, 2205, 942]) {
+        await w.output(BigInt.from(v));
+      }
+      final spentCoins = {for (final t in w.built) t.inputs.single.prevTxnId, w.contents.offered.last.txid};
+      expect(spentCoins, hasLength(3));
+      for (final id in spentCoins) {
+        expect(await chain.minedHeight(id), isNotNull, reason: 'no funding spends an unmined output');
+      }
+      expect(w.report.readyCoins, 27);
+    });
+
+    test('not enough coins: a request larger than every coin fails at once, naming the balance and the largest coin', () async {
+      final (w, chain) = await wallet(amounts: [12000]);
+      await expectLater(
+          w.output(BigInt.from(20000)),
+          throwsA(isA<WalletRefusal>()
+              .having((e) => e.reason, 'reason', contains('12000 satoshis'))
+              .having((e) => e.reason, 'reason', contains('largest coin 12000'))
+              .having((e) => e.reason, 'reason', contains('20000'))));
+      expect(chain.broadcasts, isEmpty);
+    });
+
+    test('waiting for the first split: served within one mined-poll of the split being mined', () async {
+      final (w, chain) = await wallet(amounts: [1000000], coins: const CoinsConfig(floor: 10000, target: 10, lowWater: 5));
+      await w.reconcile();
+      expect(w.report.readyCoins, 0);
+      final logs = <String>[];
+      final sub = w.log.onRecord.listen((r) => logs.add(r.message));
+      final request = w.output(BigInt.from(1784));
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(logs.any((m) => m.contains('waits for a ready coin')), isTrue);
+      final minedAt = DateTime.now();
       chain.mine();
-      final f = (await pending)!;
-      expect(sw.elapsedMilliseconds, greaterThanOrEqualTo(100));
-      expect(await chain.minedHeight(f.tx.id), isNotNull);
+      final f = (await request)!;
+      await sub.cancel();
+      expect(DateTime.now().difference(minedAt), lessThan(const Duration(milliseconds: 200)), reason: 'one poll of 20 ms and the broadcast');
+      expect(f.value, BigInt.from(1784));
     });
 
-    test('a stranded output is reused: after a failed round the next request gets it, and no funding transaction is built', () async {
+    test('a stranded output is reused, mined or not: after a failed round the next request gets it, and no funding transaction is built', () async {
       final (w, chain) = await wallet();
       final first = (await w.output(BigInt.from(1784)))!;
       expect(w.built, hasLength(1));
+      expect(await chain.minedHeight(first.tx.id), isNull, reason: 'unmined');
       // the round fails; nothing spends the output; the server reconciles
       await w.reconcile();
       expect(w.contents.offered, isEmpty);
       expect(w.contents.coins.where((c) => c.returned).single.outpoint, '${first.tx.id}:1');
-      expect(w.balance, BigInt.from(100000 - 135), reason: 'the returned output counts again');
       final again = (await w.output(BigInt.from(1784)))!;
       expect(again.tx.id, first.tx.id);
-      expect(again.vout, 1);
       expect(w.built, hasLength(1), reason: 'no funding transaction was built');
       expect(chain.broadcasts, hasLength(1));
-      // a request the stranded output does not cover builds a new one
-      final more = (await w.output(BigInt.from(5000)))!;
-      expect(more.tx.id, isNot(first.tx.id));
-      expect(w.built, hasLength(2));
     });
 
-    test('not enough coins: the request fails naming the balance, and nothing is broadcast', () async {
-      final (w, chain) = await wallet(sats: 1000);
-      await expectLater(
-          w.output(BigInt.from(5000)),
-          throwsA(isA<WalletRefusal>()
-              .having((e) => e.reason, 'reason', contains('1000 satoshis'))
-              .having((e) => e.reason, 'reason', contains('5000'))));
-      expect(chain.broadcasts, isEmpty);
-      expect(w.balance, BigInt.from(1000));
-      // through the library's own funding path it is a round failure at funding
-      expect(w.report.toString(), contains('balance 1000'));
-    });
-
-    test('a refused funding transaction leaves the record unchanged and fails with the chain\'s reason', () async {
+    test('a refused funding transaction leaves the coin ready and fails with the chain\'s reason', () async {
       final (w, chain) = await wallet();
       chain.refuse = (_) => 'mempool full';
       final before = File(w.file.path).readAsBytesSync();
       await expectLater(w.output(BigInt.from(1784)), throwsA(isA<WalletRefusal>().having((e) => e.reason, 'reason', contains('mempool full'))));
       expect(w.balance, BigInt.from(100000));
-      expect(w.contents.offered, isEmpty);
+      expect(w.report.readyCoins, 1);
       expect(w.built, isEmpty);
       expect(File(w.file.path).readAsBytesSync(), before, reason: 'nothing written');
     });
 
-    test('a top-up is noticed at reconcile, and the balance includes it', () async {
-      final (w, chain) = await wallet(sats: 1000);
-      chain.addMined(coin(7, 50000));
-      expect(w.balance, BigInt.from(1000));
+    test('a top-up is noticed: pending until mined, ready after', () async {
+      final (w, chain) = await wallet(amounts: [12000]);
+      chain.listUnmined = true;
+      // an operator pays the address; it is in the mempool, not yet mined
+      final top = coin(7, 50000);
+      await chain.broadcast(top);
       await w.reconcile();
-      expect(w.balance, BigInt.from(51000));
-      expect(w.contents.coins, hasLength(2));
-      // a second reconcile takes nothing in twice
+      expect(w.balance, BigInt.from(62000), reason: 'the balance includes it at once');
+      expect(w.report.pendingCoins, 1);
+      expect(w.report.readyCoins, 1);
+      chain.mine();
       await w.reconcile();
-      expect(w.contents.coins, hasLength(2));
-      // and it survives a reopen
-      final (_, back) = await WalletFile.open(w.file.path, 'open sesame');
-      expect(back.coins, hasLength(2));
+      expect(w.report.pendingCoins, 0);
+      expect(w.report.readyCoins, 2);
+      await w.reconcile();
+      expect(w.contents.coins, hasLength(2), reason: 'nothing taken in twice');
     });
 
-    test('a crash after broadcasting a funding transaction is recovered by the scan', () async {
-      final (w, chain) = await wallet();
-      // the funding transaction went out, the record was not written
-      final f = (await w.output(BigInt.from(1784)))!;
-      final (_, stale) = await WalletFile.open(w.file.path, 'open sesame');
-      stale.coins
-        ..clear()
-        ..add(WalletCoin(chain.known[chain.broadcasts.first]!.inputs.single.prevTxnId.let((id) => chain.known[id]!), 0));
-      stale.offered.clear();
-      final fresh = FileWallet(file: w.file, contents: stale, chain: chain, feeRate: 1);
-      await fresh.reconcile();
-      // the spent coin is gone, the change and the funding output are found
-      expect(fresh.contents.coins.map((c) => c.outpoint), containsAll(['${f.tx.id}:0', '${f.tx.id}:1']));
-      expect(fresh.balance, BigInt.from(100000 - 135));
-    });
-
-    test('rounds left: 100,000 sat after a round that cost 4,400 reports 22', () async {
-      final (w, chain) = await wallet(sats: 104400 + 3 * 135 + 500);
+    test('rounds left: a round\'s cost counts its two funding fees and its coins\' share of a split', () async {
+      final (w, chain) = await wallet(amounts: [40000, 25000, 15000, 12000]);
+      w.contents.splitFeePerCoin = BigInt.from(4);
+      kinds(w, roundOrder);
       await w.reconcile();
       expect(w.roundsLeft, isNull, reason: 'no round yet');
-      // a production round: Y 1,784, the round 396 plus dust, the witness 2,205
       final y = (await w.output(BigInt.from(1784)))!;
-      final r = (await w.output(BigInt.from(396 + 50)))!;
       final wt = (await w.output(BigInt.from(2205)))!;
-      // the round spends its funding and returns 440 change to the owner, so
-      // the round costs the 4,435 offered plus 405 in funding fees less 440
+      final r = (await w.output(BigInt.from(942)))!;
+      // the round spends its coin and returns the surplus less 396 as change
       final round = Transaction()
         ..addInput(TransactionInput(r.tx.id, r.vout, TransactionInput.MAX_SEQ_NUMBER))
-        ..addOutput(TransactionOutput(BigInt.from(440), P2PKHLockBuilder.fromAddress(addr).getScriptPubkey()));
+        ..addOutput(TransactionOutput(r.value - BigInt.from(396), P2PKHLockBuilder.fromAddress(addr).getScriptPubkey()));
       final yTx = Transaction()
         ..addInput(TransactionInput(y.tx.id, y.vout, TransactionInput.MAX_SEQ_NUMBER))
         ..addOutput(TransactionOutput(BigInt.one, SVScript()));
@@ -246,24 +414,18 @@ void main() {
       for (final t in [yTx, round, wTx]) {
         await chain.broadcast(t);
       }
+      chain.mine();
       await w.reconcile(roundTxs: [yTx, round, wTx]);
-      // the round cost what its outputs held plus the funding fees, less the change
-      expect(w.lastRoundCost, BigInt.from(4400));
-      expect(w.balance, BigInt.from(104400 + 3 * 135 + 500 - 4435 - 405 + 440));
-      // with 100,000 sat that is 22 rounds, within one
-      w.contents.coins
-        ..clear()
-        ..add(WalletCoin(coin(9, 100000), 0));
-      expect(w.balance, BigInt.from(100000));
-      expect(w.roundsLeft, 22);
-      expect(w.report.roundsLeft, 22);
-      expect(w.report.toJson()['lastRoundCost'], '4400');
+      // Y 1,784 and the witness 2,205 spent whole, the round 396, two funding
+      // fees of 135, and three coins' share of a split at 4 each
+      expect(w.lastRoundCost, BigInt.from(1784 + 2205 + 396 + 2 * 135 + 3 * 4));
+      expect(w.roundsLeft, (w.balance ~/ w.lastRoundCost!).toInt());
     });
   });
 }
 
-extension _Let<T> on T {
-  R let<R>(R Function(T) f) => f(this);
+class _Stopped implements Exception {
+  const _Stopped();
 }
 
 BigInt _feeOf(Transaction tx, Map<String, Transaction> known) {

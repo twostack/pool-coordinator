@@ -144,16 +144,20 @@ void main() {
   });
 
   group('start and recovery', () {
-    test('a stored round the chain does not show is re-broadcast in order, and the server starts once mined', () async {
+    test('a stored round the chain does not show: its funding, then Y, the round and the witness are broadcast in order, and the server starts once each is accepted, not mined', () async {
+      final funding = (await run.store.read(2))!.funding;
+      expect(funding, hasLength(3), reason: 'the fake wallet funds Y, the witness and the round');
       final again = await run.restart(before: (chain) {
-        for (final id in [run.a2.slotId, run.a2.roundId, run.a2.witnessId]) {
+        for (final id in [run.a2.slotId, run.a2.roundId, run.a2.witnessId, for (final f in funding) f.id]) {
           chain.forget(id);
         }
+        chain.mineOnBroadcast = false;
       });
       try {
-        expect(again.chain.broadcasts, [run.a2.slotId, run.a2.roundId, run.a2.witnessId]);
+        expect(again.chain.broadcasts, [for (final f in funding) f.id, run.a2.slotId, run.a2.roundId, run.a2.witnessId]);
+        expect(again.server.status.ready, isTrue);
         expect(again.server.co.ledger.round, 2);
-        expect(again.chain.minedAt[run.a2.witnessId], isNotNull);
+        expect(again.chain.minedAt[run.a2.witnessId], isNull, reason: 'started on acceptance, with no block mined');
       } finally {
         await again.dispose();
       }
@@ -172,11 +176,14 @@ void main() {
               .having((e) => e.reason, 'reason', contains('missing inputs'))));
     }, timeout: const Timeout(Duration(minutes: 2)));
 
-    test('the witness was never broadcast: the server broadcasts it, waits for it to be mined, then starts', () async {
-      final again = await run.restart(before: (chain) => chain.forget(run.a2.witnessId));
+    test('the witness was never broadcast: the server broadcasts it and starts once it is accepted, without waiting for it to be mined', () async {
+      final again = await run.restart(before: (chain) {
+        chain.forget(run.a2.witnessId);
+        chain.mineOnBroadcast = false;
+      });
       try {
         expect(again.chain.broadcasts, [run.a2.witnessId]);
-        expect(again.chain.minedAt[run.a2.witnessId], isNotNull);
+        expect(again.chain.minedAt[run.a2.witnessId], isNull);
         expect(again.server.status.ready, isTrue);
       } finally {
         await again.dispose();
@@ -198,6 +205,64 @@ void main() {
         await again.dispose();
       }
     }, timeout: const Timeout(Duration(minutes: 2)));
+  });
+
+  group('the unmined bound and re-broadcast', () {
+    test('the limit holds a round: at 1, round 2 is not funded while round 1 is unmined, the status says why, and it is funded within a mined poll of round 1 being mined', () async {
+      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.mineOnBroadcast = false, serverExtra: '  max_unmined_rounds: 1\n');
+      try {
+        await fresh._round(1, fresh.round1Bytes());
+        expect(fresh.chain.minedAt[fresh.chain.broadcasts.last], isNull, reason: 'round 1 is unmined');
+        final askedAfterRound1 = fresh.wallet.asked.length;
+        var i = 0;
+        for (final t in c.f.transfers2) {
+          fresh.transport.send('h${i++}', PoolSubmission.of(t, c.f.agg.spendP, rng: rng).encode());
+        }
+        await until(() async => fresh.status()['waiting'] != null, what: 'the status file to say the round is held');
+        expect(fresh.server.status.waiting, contains('limit of 1'));
+        expect(fresh.status()['waiting'], contains('not yet mined'));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        expect(fresh.wallet.asked.length, askedAfterRound1, reason: 'no funding for round 2 while held');
+        expect(fresh.server.co.status.lastFailure, isNull, reason: 'nothing proved or failed');
+        // intake goes on while held
+        expect(fresh.transport.replies.keys.where((k) => k.startsWith('h')), hasLength(c.f.transfers2.length));
+        final minedAt = DateTime.now();
+        fresh.chain.mine();
+        await until(() async => fresh.wallet.asked.length > askedAfterRound1, what: 'round 2 to be funded', timeout: const Duration(seconds: 10));
+        // the wallet's own time: the library proves round 2 on this isolate
+        // right after, which holds the test's polling back
+        expect(fresh.wallet.askedAt[askedAfterRound1].difference(minedAt), lessThan(const Duration(seconds: 1)),
+            reason: 'within the watcher\'s mined poll and the hold\'s, 20 ms each');
+        await until(() async => fresh.transport.entries.length == 3 && !fresh.server.publishing, what: 'round 2 to be announced');
+        expect(fresh.server.status.waiting, isNull);
+      } finally {
+        await fresh.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 5)));
+
+    test('a round dropped from the mempool: after three blocks its funding, then Y, the round and the witness are broadcast again, and it is mined at the next block', () async {
+      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.mineOnBroadcast = false);
+      try {
+        await fresh._round(1, fresh.round1Bytes());
+        final r1 = (await fresh.store.read(1))!;
+        final order = [for (final f in r1.funding) f.id, r1.y.id, r1.round.id, r1.witness.id];
+        for (final id in order.reversed) {
+          expect(fresh.chain.drop(id), isTrue, reason: 'unmined, so droppable');
+        }
+        final broadcastsBefore = fresh.chain.broadcasts.length;
+        for (int b = 0; b < 3; b++) {
+          fresh.chain.mine();
+        }
+        await until(() async => fresh.chain.broadcasts.length >= broadcastsBefore + order.length,
+            what: 'the re-broadcast', timeout: const Duration(seconds: 20));
+        expect(fresh.chain.broadcasts.sublist(broadcastsBefore), order, reason: 'funding first, then Y, the round and the witness');
+        fresh.chain.mine();
+        await until(() async => fresh.server.status.minedTip == 1, what: 'round 1 to be seen mined', timeout: const Duration(seconds: 10));
+        expect(fresh.server.status.lastFailure, isNull);
+      } finally {
+        await fresh.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 5)));
   });
 
   group('intake', () {
@@ -1023,7 +1088,14 @@ class _Run {
   _Run._(this.c, this.rng, this.dir, this.chain, this.wallet, this.transport, this.store, this.config);
 
   static Future<_Run> _make(PoolTestChain c, Random rng,
-      {Directory? dir, FakeChain? chain, BigInt? balance, FakeTransport? transport, Duration walletDelay = Duration.zero, bool api = true, String? metricsFile}) async {
+      {Directory? dir,
+      FakeChain? chain,
+      BigInt? balance,
+      FakeTransport? transport,
+      Duration walletDelay = Duration.zero,
+      bool api = true,
+      String? metricsFile,
+      String serverExtra = ''}) async {
     final d = dir ?? Directory.systemTemp.createTempSync('pool-server');
     final log = EventLog();
     final ch = chain ?? (FakeChain(log: log)
@@ -1033,7 +1105,7 @@ class _Run {
       ..addMined(c.depositTx));
     final signer = DefaultTransactionSigner(sigHashAll, opKey);
     final opAddr = Address.fromPublicKey(opKey.publicKey, NetworkType.TEST);
-    final wallet = FakeWallet(signer, opKey.publicKey, opAddr, balance: balance, delay: walletDelay);
+    final wallet = FakeWallet(signer, opKey.publicKey, opAddr, balance: balance, delay: walletDelay)..onGiven = ch.accept;
     final t = transport ?? FakeTransport(log: log, peerId: 'coordinator');
     final config = PoolConfig.parse('''
 plan: test
@@ -1065,7 +1137,7 @@ server:
   status_file: status.json
   mined_poll_ms: 20
   funding_timeout_seconds: 60
-${api ? 'api:\n  enabled: true\n  port: 0\n${metricsFile == null ? '' : '  metrics_file: $metricsFile\n'}' : ''}''', baseDir: d.path);
+$serverExtra${api ? 'api:\n  enabled: true\n  port: 0\n${metricsFile == null ? '' : '  metrics_file: $metricsFile\n'}' : ''}''', baseDir: d.path);
     final store = FileRoundStore(config.store.directory, keepSnapshots: 10);
     return _Run._(c, rng, d, ch, wallet, t, store, config);
   }
@@ -1077,8 +1149,13 @@ ${api ? 'api:\n  enabled: true\n  port: 0\n${metricsFile == null ? '' : '  metri
 
   /// A server on an empty store.
   static Future<_Run> fresh(PoolTestChain c, Random rng,
-      {void Function(FakeChain chain)? before, BigInt? balance, Duration walletDelay = Duration.zero, bool api = true, String? metricsFile}) async {
-    final r = await _make(c, rng, balance: balance, walletDelay: walletDelay, api: api, metricsFile: metricsFile);
+      {void Function(FakeChain chain)? before,
+      BigInt? balance,
+      Duration walletDelay = Duration.zero,
+      bool api = true,
+      String? metricsFile,
+      String serverExtra = ''}) async {
+    final r = await _make(c, rng, balance: balance, walletDelay: walletDelay, api: api, metricsFile: metricsFile, serverExtra: serverExtra);
     before?.call(r.chain);
     await r._start();
     return r;

@@ -114,7 +114,10 @@ class TestnetChain implements ChainAccess {
             throw ChainError(endpoint, 'unspent/all returned an output it did not describe');
           }
           if (u['isSpentInMempoolTx'] == true) continue;
-          out.add(UnspentOutput(id, pos, BigInt.from(value)));
+          // a mined output's block height; 0, or unconfirmed, while unmined
+          final h = u['height'];
+          final mined = u['status'] != 'unconfirmed' && h is int && h > 0;
+          out.add(UnspentOutput(id, pos, BigInt.from(value), height: mined ? h : null));
         }
         return out;
       case TestnetCall.arcTx:

@@ -12,6 +12,7 @@ import 'chain_access.dart';
 import 'api/api_host.dart';
 import 'api/pool_api.dart';
 import 'config.dart';
+import 'funding_requests.dart';
 import 'install_check.dart' show kernelsMissing;
 import 'metrics/history_rebuild.dart';
 import 'metrics/metrics_history.dart';
@@ -206,7 +207,7 @@ class PoolServer {
       tool: tool,
       ledger: ledger,
       funding: wallet,
-      store: store,
+      store: FundedStore(store, wallet.fundingOf),
       publish: _publish,
       owner: wallet.owner,
       ownerPub: wallet.ownerPub,
@@ -214,6 +215,8 @@ class PoolServer {
       notify: expired,
     );
     co.chainHeight = await chain.height();
+    wallet.requestKind = FundingRequests(() => co.lastTiming).next;
+    wallet.beforeRequest = _beforeFunding;
     lap('coordinator');
 
     await _checkFeed();
@@ -249,28 +252,96 @@ class PoolServer {
 
   /// Re-broadcasts what the chain does not show of the stored round, in
   /// order, and waits until all three are mined.
+  /// A stored round's transactions in the order the chain needs them: the
+  /// funding transactions first, then Y, the round and the witness.
+  static List<(Transaction, String)> _inOrder(StoredRound r) => [
+        for (int i = 0; i < r.funding.length; i++) (r.funding[i], 'funding ${i + 1}'),
+        (r.y, 'Y'),
+        (r.round, 'round'),
+        (r.witness, 'witness'),
+      ];
+
+  /// At start: broadcasts in order any of the stored round's transactions
+  /// the chain does not know, and starts once each is accepted, without
+  /// waiting for a block. A refusal stops the start, naming it.
   Future<void> _reBroadcast(StoredRound r) async {
-    for (final (tx, what) in [(r.y, 'Y'), (r.round, 'round'), (r.witness, 'witness')]) {
-      if (await chain.minedHeight(tx.id) != null) continue;
-      if (await chain.fetch(tx.id) != null) {
-        log.info('round ${r.number}\'s $what ${tx.id} is known to the chain but not mined; waiting');
-      } else {
-        log.warning('round ${r.number}\'s $what ${tx.id} is not on the chain; broadcasting it again');
-        try {
-          await chain.broadcast(tx);
-        } on BroadcastRefusal catch (e) {
-          throw StartRefusal('round ${r.number}\'s $what ${tx.id} was refused when broadcast again: ${e.reason}');
-        }
+    for (final (tx, what) in _inOrder(r)) {
+      if (await chain.minedHeight(tx.id) != null || await chain.fetch(tx.id) != null) continue;
+      log.warning('round ${r.number}\'s $what ${tx.id} is not on the chain; broadcasting it again');
+      try {
+        await chain.broadcast(tx);
+      } on BroadcastRefusal catch (e) {
+        if (_alreadyKnown(e)) continue;
+        throw StartRefusal('round ${r.number}\'s $what ${tx.id} was refused when broadcast again: ${e.reason}');
       }
-      await _waitMined(tx.id, 'round ${r.number}\'s $what');
     }
   }
 
-  Future<void> _waitMined(String txid, String what) async {
-    final deadline = DateTime.now().add(config.server.fundingTimeout);
-    while (await chain.minedHeight(txid) == null) {
-      if (DateTime.now().isAfter(deadline)) throw StartRefusal('$what $txid was not mined within ${config.server.fundingTimeout}');
+  /// A refusal that says the chain has the transaction already, which a
+  /// broadcast made again counts as its acceptance.
+  static bool _alreadyKnown(BroadcastRefusal e) =>
+      RegExp(r'already (known|in|have)|txn-already|known transaction', caseSensitive: false).hasMatch('${e.status ?? ''} ${e.reason}');
+
+  /// During a run: round [n] still unmined some blocks after publication
+  /// is broadcast again, funding first. Nothing here stops the server; a
+  /// refusal is the last failure, naming the round and the transaction.
+  Future<void> _reBroadcastDuringRun(int n) async {
+    final StoredRound? r;
+    try {
+      r = await store.read(n);
+    } catch (e) {
+      log.warning('round $n could not be read to broadcast it again: $e');
+      return;
+    }
+    if (r == null) return;
+    log.warning('round $n is still unmined ${config.server.rebroadcastAfterBlocks} blocks after publication; broadcasting it again');
+    for (final (tx, what) in _inOrder(r)) {
+      try {
+        final st = await chain.broadcast(tx);
+        log.info('round $n\'s $what ${tx.id} broadcast again ($st)');
+      } on BroadcastRefusal catch (e) {
+        if (_alreadyKnown(e)) {
+          log.info('round $n\'s $what ${tx.id} is already known to the chain');
+          continue;
+        }
+        status.fail('round $n\'s $what ${tx.id} was refused when broadcast again: ${e.reason}');
+        log.warning('round $n\'s $what ${tx.id} was refused when broadcast again: ${e.reason}');
+      } catch (e) {
+        log.warning('round $n\'s $what ${tx.id} could not be broadcast again: $e');
+      }
+    }
+  }
+
+  /// Run before every funding request; only Y's, the first of a round, is
+  /// held: until the replies of the batch that closed the round are sent,
+  /// and while the rounds published and not yet mined are at the limit.
+  /// So a round is either not started or funded through.
+  Future<void> _beforeFunding() async {
+    final t = co.lastTiming;
+    if (t != null && t.stages.containsKey(FundingRequests.dryBuilds)) return;
+    // the round was closed by a submission whose reply is still on its
+    // way: once Y is funded the library proves on this isolate, which
+    // would hold that reply for the proof's length, so the batch's replies
+    // go first (the wallet's wait for a block used to give them the time)
+    final replied = DateTime.now().add(_replyGrace);
+    while (_draining && !_stopping && DateTime.now().isBefore(replied)) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    var logged = false;
+    while (!_stopping && co.ledger.round - _minedTip >= config.server.maxUnminedRounds) {
+      final why = '${co.ledger.round - _minedTip} rounds are published and not yet mined, the limit of '
+          '${config.server.maxUnminedRounds}; the next round is funded once one is mined';
+      if (!logged) {
+        log.info(why);
+        status.waiting = why;
+        await _refresh();
+        logged = true;
+      }
       await Future<void>.delayed(config.server.minedPoll);
+    }
+    if (logged) {
+      status.waiting = null;
+      await _refresh();
     }
   }
 
@@ -583,7 +654,7 @@ class PoolServer {
     status.wallet = wallet.report;
     final f = s.lastFailure;
     if (f != null && '$f' != status.lastFailure) status.fail('$f');
-    status.needsTopUp = (f != null && f.stage == 'funding') || wallet.roundsLeft == 0;
+    status.needsTopUp = (f != null && f.stage == 'funding') || wallet.roundsLeft == 0 || wallet.report.needsTopUp;
     status.stopping = _stopping;
     try {
       await status.write(config.server.statusFile);
@@ -743,6 +814,7 @@ class PoolServer {
   Future<void> _startApi() async {
     final m = metrics, cfg = config.api, genesis = config.genesis;
     if (m == null || cfg == null || genesis == null) return;
+    final w = cfg.wallet;
     try {
       api = await ApiHost.start(
         config: cfg,
@@ -761,6 +833,21 @@ class PoolServer {
             // A test-network node is the regtest localnet: no explorer.
             _ => null,
           },
+          wallet: w == null
+              ? null
+              : WalletFacts(
+                  // cloak's names; as for the explorer, a test-network node is
+                  // taken to be the regtest localnet
+                  network: switch ((config.network, config.chain.kind)) {
+                    (NetworkType.MAIN, _) => 'mainnet',
+                    (_, ChainKind.testnet) => 'testnet',
+                    _ => 'regtest',
+                  },
+                  server: w.server,
+                  coordinator: transport.peerId,
+                  peers: w.peers,
+                  arcUrl: w.arcUrl?.toString(),
+                ),
         ),
       );
       log.info('the API is at http://${cfg.bind.address}:${api!.port}/api/');
@@ -784,6 +871,13 @@ class PoolServer {
     m.observe(assembling: s.pending > 0, deadline: s.deadline, tipRound: co.ledger.round, laps: laps);
   }
 
+  /// The most a round's funding waits for the replies of the batch that
+  /// closed it.
+  static const _replyGrace = Duration(seconds: 5);
+
+  /// How many mined polls go between asks for the chain's height.
+  static const _heightEvery = 15;
+
   void _watchMined(int number, String witness) {
     // below the mined tip only the history wants a height
     if (number <= _minedTip && metrics == null) return;
@@ -803,9 +897,21 @@ class PoolServer {
         final txid = _minedQueue[n]!;
         final giveUp = DateTime.now().add(config.server.fundingTimeout);
         int? height;
+        // the chain's height when the watch began, and a look at it every
+        // so often: a round unmined some blocks on is broadcast again
+        int? since;
+        var polls = 0;
         while (!_stopping) {
           try {
             height = await chain.minedHeight(txid);
+            if (height == null && polls++ % _heightEvery == 0) {
+              final now = await chain.height();
+              since ??= now;
+              if (now - since >= config.server.rebroadcastAfterBlocks) {
+                await _reBroadcastDuringRun(n);
+                since = now;
+              }
+            }
           } catch (e) {
             log.fine('asking whether round $n\'s witness is mined: $e');
           }

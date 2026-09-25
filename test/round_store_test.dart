@@ -33,14 +33,14 @@ void main() {
       final store = FileRoundStore(dir.path);
       var completeAtFirstBroadcast = false;
       final co = s.make(
-          store: store,
+          store: FundedStore(store, s.wallet.fundingOf),
           publish: (tx) async {
             if (s.chain.broadcasts.isEmpty) completeAtFirstBroadcast = store.complete(1);
             await s.chain.broadcast(tx);
           });
       final a = await s.close(co, s.round1);
       expect(a.round, 1);
-      expect(completeAtFirstBroadcast, isTrue, reason: 'the four files and the record existed before Y was broadcast');
+      expect(completeAtFirstBroadcast, isTrue, reason: 'the files, the funding files and the record existed before Y was broadcast');
       expect(s.chain.broadcasts, [a.slotId, a.roundId, a.witnessId]);
       expect(await store.lastNumber(), 1);
       final back = (await store.read(1))!;
@@ -48,6 +48,9 @@ void main() {
       expect(back.round.serialize(), co.ledger.tipRound.serialize());
       expect(back.witness.serialize(), co.ledger.tipWitness.serialize());
       expect(back.snapshot, co.ledger.snapshot());
+      // the funding Y, the round and the witness spend, stored with them
+      expect(back.funding.map((t) => t.id), s.wallet.given.map((t) => t.id));
+      expect(back.funding, hasLength(3));
       expect(await store.read(2), isNull);
 
       // a copied store: the same round, the same ledger
@@ -92,12 +95,42 @@ void main() {
     await expectLater(store.read(3), throwsA(isA<StoreRefusal>().having((e) => e.file, 'file', 'witness.tx')));
   });
 
+  test('funding files: stored beside the round, read back in order, and one cut short is refused naming it', () async {
+    final store = FileRoundStore(dir.path);
+    await FundedStore(store, (spenders) => [fakeTx(21), fakeTx(22)]).roundBuilt(4, fakeTx(1), fakeTx(2), fakeTx(3), Uint8List(0));
+    expect(store.complete(4), isTrue);
+    final back = (await store.read(4))!;
+    expect(back.funding.map((t) => t.id), [fakeTx(21).id, fakeTx(22).id]);
+    final f = File('${dir.path}/rounds/000004/funding-1.tx');
+    final bytes = f.readAsBytesSync();
+    f.writeAsBytesSync(bytes.sublist(0, bytes.length - 3));
+    expect(store.complete(4), isTrue, reason: 'present, if cut short');
+    await expectLater(store.read(4), throwsA(isA<StoreRefusal>().having((e) => e.file, 'file', 'funding-1.tx')));
+    f.deleteSync();
+    expect(store.complete(4), isFalse, reason: 'a funding file named by the record is missing');
+    await expectLater(store.read(4), throwsA(isA<StoreRefusal>().having((e) => e.reason, 'reason', contains('missing'))));
+  });
+
+  test('a round stored before this change: a version 1 record reads as a round with no funding', () async {
+    final store = FileRoundStore(dir.path);
+    await store.roundBuilt(5, fakeTx(1), fakeTx(2), fakeTx(3), Uint8List(0));
+    final f = File('${dir.path}/rounds/000005/round.json');
+    final record = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>
+      ..remove('funding')
+      ..['version'] = 1;
+    f.writeAsStringSync(jsonEncode(record));
+    final back = (await store.read(5))!;
+    expect(back.funding, isEmpty);
+    expect(back.round.id, fakeTx(2).id);
+    expect(await store.txidsOf(5), (round: fakeTx(2).id, witness: fakeTx(3).id));
+  });
+
   test('an unknown record version is refused naming the round and the version', () async {
     final store = FileRoundStore(dir.path);
     await store.roundBuilt(2, fakeTx(1), fakeTx(2), fakeTx(3), Uint8List(0));
     final f = File('${dir.path}/rounds/000002/round.json');
     final record = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
-    expect(record['version'], 1);
+    expect(record['version'], 2);
     expect(record['round'], fakeTx(2).id);
     f.writeAsStringSync(jsonEncode({...record, 'version': 7}));
     await expectLater(
@@ -105,7 +138,7 @@ void main() {
         throwsA(isA<StoreRefusal>()
             .having((e) => e.round, 'round', 2)
             .having((e) => e.reason, 'reason', contains('version 7'))
-            .having((e) => e.reason, 'reason', contains('version 1'))));
+            .having((e) => e.reason, 'reason', contains('versions 1 and 2'))));
     f.writeAsStringSync('not json');
     await expectLater(store.read(2), throwsA(isA<StoreRefusal>().having((e) => e.file, 'file', 'round.json')));
   });

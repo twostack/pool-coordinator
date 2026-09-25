@@ -27,16 +27,21 @@ class WalletCoin {
   /// back unspent; it is offered again before a new one is made.
   final bool returned;
 
-  WalletCoin(this.tx, this.vout, {this.returned = false});
+  /// The height the coin's transaction was mined at, or null while it is
+  /// pending. A coin is ready, and can serve a request, only once mined.
+  int? height;
+
+  WalletCoin(this.tx, this.vout, {this.returned = false, this.height});
 
   String get txid => tx.id;
   BigInt get satoshis => tx.outputs[vout].satoshis;
   String get outpoint => '$txid:$vout';
+  bool get mined => height != null;
 
-  Map<String, dynamic> toJson() => {'tx': tx.serialize(), 'vout': vout, if (returned) 'returned': true};
+  Map<String, dynamic> toJson() => {'tx': tx.serialize(), 'vout': vout, if (returned) 'returned': true, 'height': height};
 
   static WalletCoin fromJson(Map<String, dynamic> j) =>
-      WalletCoin(Transaction.fromHex(j['tx'] as String), j['vout'] as int, returned: j['returned'] == true);
+      WalletCoin(Transaction.fromHex(j['tx'] as String), j['vout'] as int, returned: j['returned'] == true, height: j['height'] as int?);
 }
 
 /// What the wallet file holds once opened.
@@ -45,20 +50,36 @@ class WalletContents {
   final NetworkType network;
   final List<WalletCoin> coins;
   final List<WalletCoin> offered;
+
+  /// Splits written before their broadcast and kept until they are mined,
+  /// so one a crash left unbroadcast is broadcast at the next start.
+  final List<Transaction> splits;
   BigInt? lastRoundCost;
   BigInt? balanceAtReconcile;
+
+  /// The fee of the last split over the outputs it made: what each coin a
+  /// round spends carries of it, in the round's cost.
+  BigInt? splitFeePerCoin;
+
+  /// The format the contents were read in: 1 for a file from before the
+  /// coin store, whose coins' heights the wallet asks the chain for.
+  final int readFormat;
 
   WalletContents({
     required this.ownerKey,
     required this.network,
     List<WalletCoin>? coins,
     List<WalletCoin>? offered,
+    List<Transaction>? splits,
     this.lastRoundCost,
     this.balanceAtReconcile,
+    this.splitFeePerCoin,
+    this.readFormat = formatVersion,
   })  : coins = coins ?? [],
-        offered = offered ?? [];
+        offered = offered ?? [],
+        splits = splits ?? [];
 
-  static const formatVersion = 1;
+  static const formatVersion = 2;
 
   Map<String, dynamic> toJson() => {
         'version': formatVersion,
@@ -66,20 +87,29 @@ class WalletContents {
         'ownerKey': ownerKey.toHex(),
         'coins': [for (final c in coins) c.toJson()],
         'offered': [for (final c in offered) c.toJson()],
+        'splits': [for (final t in splits) t.serialize()],
         'lastRoundCost': lastRoundCost?.toString(),
         'balanceAtReconcile': balanceAtReconcile?.toString(),
+        'splitFeePerCoin': splitFeePerCoin?.toString(),
       };
 
+  /// Reads format 2, and format 1, whose coins carry no height: they read
+  /// as pending until the wallet has asked the chain about each.
   static WalletContents fromJson(Map<String, dynamic> j) {
-    if (j['version'] != formatVersion) throw FormatException('contents version ${j['version']}');
+    final version = j['version'];
+    if (version != 1 && version != formatVersion) throw FormatException('contents format $version, and this server reads 1 and $formatVersion');
     final network = j['network'] == 'main' ? NetworkType.MAIN : NetworkType.TEST;
+    BigInt? big(String k) => j[k] == null ? null : BigInt.parse(j[k] as String);
     return WalletContents(
       ownerKey: SVPrivateKey.fromHex(j['ownerKey'] as String, network),
       network: network,
       coins: [for (final c in j['coins'] as List) WalletCoin.fromJson(c as Map<String, dynamic>)],
       offered: [for (final c in j['offered'] as List) WalletCoin.fromJson(c as Map<String, dynamic>)],
-      lastRoundCost: j['lastRoundCost'] == null ? null : BigInt.parse(j['lastRoundCost'] as String),
-      balanceAtReconcile: j['balanceAtReconcile'] == null ? null : BigInt.parse(j['balanceAtReconcile'] as String),
+      splits: [for (final t in (j['splits'] as List?) ?? const []) Transaction.fromHex(t as String)],
+      lastRoundCost: big('lastRoundCost'),
+      balanceAtReconcile: big('balanceAtReconcile'),
+      splitFeePerCoin: big('splitFeePerCoin'),
+      readFormat: version as int,
     );
   }
 }

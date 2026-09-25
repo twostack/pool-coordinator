@@ -15,6 +15,7 @@ export 'src/node_chain.dart';
 export 'src/plans.dart';
 export 'src/testnet_chain.dart';
 export 'src/file_wallet.dart';
+export 'src/funding_requests.dart';
 export 'src/wallet_file.dart';
 export 'src/file_round_store.dart';
 export 'src/identity.dart';

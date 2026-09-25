@@ -88,6 +88,29 @@ class FakeChain implements ChainAccess {
     }
   }
 
+  /// Takes [tx] as another party broadcast it, not the server: known, its
+  /// inputs spent, mined when the chain mines on broadcast, and not in
+  /// [broadcasts]. The fake wallet's funding reaches the chain this way.
+  void accept(Transaction tx) {
+    known[tx.id] = tx;
+    for (final i in tx.inputs) {
+      spentOutpoints.add('${i.prevTxnId}:${i.prevTxnOutputIndex}');
+    }
+    if (mineOnBroadcast) _mineOne(tx, _height);
+  }
+
+  /// Drops [txid] from the mempool, as an eviction would: an unmined
+  /// transaction is forgotten and its inputs are unspent again, and a
+  /// broadcast of it later is taken afresh. A mined one is left alone.
+  bool drop(String txid) {
+    if (minedAt.containsKey(txid) || !known.containsKey(txid)) return false;
+    forget(txid);
+    dropped.add(txid);
+    return true;
+  }
+
+  final dropped = <String>[];
+
   @override
   Future<String> broadcast(Transaction tx) async {
     await beforeBroadcast?.call(tx);
@@ -96,6 +119,11 @@ class FakeChain implements ChainAccess {
     broadcasts.add(tx.id);
     log.add('broadcast ${tx.id}');
     known[tx.id] = tx;
+    // accepted into the mempool: its inputs are spent from now on, mined
+    // or not, as a node's mempool would have them
+    for (final i in tx.inputs) {
+      spentOutpoints.add('${i.prevTxnId}:${i.prevTxnOutputIndex}');
+    }
     if (mineOnBroadcast) _mineOne(tx, ++_height);
     return 'fake';
   }
@@ -133,15 +161,19 @@ class FakeChain implements ChainAccess {
     return !spentOutpoints.contains('$txid:$vout');
   }
 
+  /// Whether [unspentOf] lists unmined outputs as well, as WhatsOnChain's
+  /// `unspent/all` does on testnet; by default it lists mined ones only.
+  bool listUnmined = false;
+
   @override
   Future<List<UnspentOutput>> unspentOf(Address address) async {
     final pkh = address.pubkeyHash160;
     final out = <UnspentOutput>[];
     for (final tx in known.values) {
-      if (!minedAt.containsKey(tx.id)) continue;
+      if (!listUnmined && !minedAt.containsKey(tx.id)) continue;
       for (int v = 0; v < tx.outputs.length; v++) {
         if (spentOutpoints.contains('${tx.id}:$v')) continue;
-        if (paysPKH(tx.outputs[v], pkh)) out.add(UnspentOutput(tx.id, v, tx.outputs[v].satoshis));
+        if (paysPKH(tx.outputs[v], pkh)) out.add(UnspentOutput(tx.id, v, tx.outputs[v].satoshis, height: minedAt[tx.id]));
       }
     }
     return out;
@@ -164,18 +196,30 @@ class FakeWallet implements CoordinatorWallet {
   @override
   final Address address;
   final asked = <BigInt>[];
+
+  /// When each request was answered, which a test polling [asked] can see
+  /// late: the library proves on this isolate right after.
+  final askedAt = <DateTime>[];
   final given = <Transaction>[];
   bool dead = false;
   int? failAt;
+  @override
+  FundingKind Function()? requestKind;
+  @override
+  Future<void> Function()? beforeRequest;
   @override
   BigInt balance;
   @override
   BigInt? lastRoundCost;
   int reconciles = 0;
 
-  /// How long a funding request takes, standing in for the broadcast and
-  /// the block a real wallet waits for; zero still yields once.
+  /// How long a funding request takes, standing in for the broadcast a
+  /// real wallet waits on; zero still yields once.
   final Duration delay;
+
+  /// Called with each funding transaction handed out, as a real wallet
+  /// broadcasts it: a server test puts it on its fake chain.
+  void Function(Transaction tx)? onGiven;
 
   FakeWallet(this.owner, this.ownerPub, this.address, {BigInt? balance, this.delay = Duration.zero})
       : balance = balance ?? BigInt.from(100000000);
@@ -185,9 +229,11 @@ class FakeWallet implements CoordinatorWallet {
     // a real wallet broadcasts and waits for a block here, which is what
     // lets the reply to the round-filling submission out before the
     // build's proving takes the isolate; the fake yields once for the same
+    await beforeRequest?.call();
     await Future<void>.delayed(delay);
     final n = asked.length;
     asked.add(minValue);
+    askedAt.add(DateTime.now());
     if (dead || failAt == n) return null;
     if (minValue > balance) throw WalletRefusal('the wallet holds $balance satoshis, the request needs $minValue');
     final prev = List.filled(32, 0x50)
@@ -199,8 +245,15 @@ class FakeWallet implements CoordinatorWallet {
       ..addInput(TransactionInput(hex.encode(prev), 0, TransactionInput.MAX_SEQ_NUMBER))
       ..addOutput(TransactionOutput(minValue, P2PKHLockBuilder.fromAddress(address).getScriptPubkey()));
     given.add(tx);
+    onGiven?.call(tx);
     balance -= minValue;
     return FundingOutput(tx, 0, owner, ownerPub);
+  }
+
+  @override
+  List<Transaction> fundingOf(List<Transaction> spenders) {
+    final ids = {for (final s in spenders) for (final i in s.inputs) i.prevTxnId};
+    return [for (final t in given) if (ids.contains(t.id)) t];
   }
 
   @override
@@ -222,9 +275,10 @@ class FakeStore extends RoundStore {
   FakeStore({EventLog? log}) : log = log ?? EventLog();
 
   @override
-  Future<void> roundBuilt(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot) async {
+  Future<void> roundBuiltWith(int number, Transaction y, Transaction round, Transaction witness, Uint8List snapshot,
+      {List<Transaction> funding = const []}) async {
     log.add('store $number');
-    rounds[number] = StoredRound(number, y, round, witness, Uint8List.fromList(snapshot));
+    rounds[number] = StoredRound(number, y, round, witness, Uint8List.fromList(snapshot), funding: funding);
   }
 
   @override

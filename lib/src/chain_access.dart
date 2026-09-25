@@ -26,12 +26,15 @@ class BroadcastRefusal implements Exception {
   String toString() => '$endpoint refused the transaction${status == null ? '' : ' ($status)'}: $reason';
 }
 
-/// One unspent output at an address, as the top-up scan finds it.
+/// One unspent output at an address, as the top-up scan finds it, with
+/// the height its transaction was mined at when the endpoint says (null
+/// while it is unmined, or when the endpoint does not say).
 class UnspentOutput {
   final String txid;
   final int vout;
   final BigInt satoshis;
-  const UnspentOutput(this.txid, this.vout, this.satoshis);
+  final int? height;
+  const UnspentOutput(this.txid, this.vout, this.satoshis, {this.height});
 
   String get outpoint => '$txid:$vout';
 
