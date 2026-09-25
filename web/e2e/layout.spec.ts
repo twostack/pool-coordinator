@@ -23,6 +23,15 @@ test.describe('at 360 px', () => {
     expect(box.scroll).toBeGreaterThan(box.client);
     // pinned to the newest card: the right end is in view
     expect(box.left + box.client).toBeGreaterThanOrEqual(box.scroll - 16);
+    // the cards fit the scroll's height: it scrolls sideways only
+    expect(await scroll.evaluate((el) => el.scrollHeight - el.clientHeight)).toBe(0);
+
+    // the tiles and the charts below them do not touch
+    const gap = await page.evaluate(() => {
+      const root = document.querySelector('pool-dashboard')!.shadowRoot!;
+      return root.querySelector('.charts')!.getBoundingClientRect().top - root.querySelector('pool-stats')!.getBoundingClientRect().bottom;
+    });
+    expect(gap).toBeGreaterThanOrEqual(8);
 
     await scroll.focus();
     await page.keyboard.press('ArrowLeft');

@@ -12,6 +12,7 @@ export const cardStyles = css`
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
+    box-sizing: border-box;
     block-size: 100%;
     padding: 0.85rem 1rem;
     border: 1px solid var(--pool-border);
