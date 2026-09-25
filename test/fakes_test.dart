@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
@@ -21,6 +22,27 @@ void main() {
     ..addOutput(TransactionOutput(sats, P2PKHLockBuilder.fromAddress(addr).getScriptPubkey()));
 
   group('FakeChain', () {
+    test('status by txid, a mined transaction broadcast again, a delayed broadcast and one that never answers', () async {
+      final chain = FakeChain(height: 10)..mineOnBroadcast = false;
+      final a = coin(1, BigInt.from(1000));
+      expect(await chain.statusOf(a.id), TxStatus.unknown);
+      expect(await broadcastSeen(chain, a), TxStatus.seen);
+      expect(await chain.statusOf(a.id), TxStatus.seen);
+      chain.mine();
+      expect(await chain.statusOf(a.id), TxStatus.mined);
+      expect(await broadcastSeen(chain, a), TxStatus.mined, reason: 'MINED, as ARC answers a mined transaction');
+      chain.statuses[a.id] = TxStatus.unknown;
+      expect(await chain.statusOf(a.id), TxStatus.unknown, reason: 'a set status wins');
+      final b = coin(2, BigInt.from(1000));
+      chain.beforeBroadcast = (tx) => Future<void>.delayed(const Duration(milliseconds: 300));
+      final sw = Stopwatch()..start();
+      await chain.broadcast(b);
+      expect(sw.elapsedMilliseconds, greaterThanOrEqualTo(300));
+      chain.beforeBroadcast = (tx) => Completer<void>().future;
+      final never = chain.broadcast(coin(3, BigInt.one));
+      expect(await Future.any([never.then((_) => 'answered'), Future.delayed(const Duration(milliseconds: 200), () => 'silent')]), 'silent');
+    });
+
     test('a broadcast is mined, and its inputs are spent', () async {
       final chain = FakeChain(height: 10);
       final a = coin(1, BigInt.from(1000));

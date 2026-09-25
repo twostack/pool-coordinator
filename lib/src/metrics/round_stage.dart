@@ -3,8 +3,8 @@
 /// three are what a reader of the page can tell apart and what the chain
 /// will eventually show.
 enum RoundStage {
-  /// From close until the aggregation's root unlock is built: expiry, the
-  /// funding for Y, padding, the trees and the proving itself.
+  /// From close until the aggregation's root unlock is built: deposits
+  /// still being admitted, expiry, the funding for Y, padding, the trees and the proving itself.
   proving,
 
   /// Building Y, the round and the witness at their priced fees, applying
@@ -24,6 +24,7 @@ enum RoundStage {
 /// runs a real round and fails if the library's order ever differs from
 /// this one.
 const libraryLaps = [
+  'admission',
   'expiry',
   'funding',
   'padding',
@@ -42,6 +43,7 @@ const libraryLaps = [
 /// The public stage of the work after each lap: after `root unlock` the
 /// round is being built and funded, after `store` it is being published.
 const stageAfter = {
+  'admission': RoundStage.proving,
   'expiry': RoundStage.proving,
   'funding': RoundStage.proving,
   'padding': RoundStage.proving,
@@ -77,6 +79,7 @@ const provingLaps = ['trees', 'aggregation', 'root unlock'];
 
 /// The laps from close to stored, whose sum is the build time.
 const buildLaps = [
+  'admission',
   'expiry',
   'funding',
   'padding',

@@ -95,6 +95,11 @@ void main() {
         'error': null,
         'id': 'x'
       }),
+      NodeCall.status: jsonEncode({
+        'result': {'txid': txid, 'confirmations': 3, 'blockheight': 5},
+        'error': null,
+        'id': 'x'
+      }),
       NodeCall.unspent: jsonEncode({
         'result': [
           {'txid': txid, 'vout': 0, 'address': 'n3GNqMveyvaPvUbH469vDRadqpJMPc84JA', 'amount': 0.00050000, 'confirmations': 5}
@@ -137,6 +142,7 @@ void main() {
       TestnetCall.unspentAll:
           '{"address":"n3GNqMveyvaPvUbH469vDRadqpJMPc84JA","script":"a7ec","result":[{"height":280589,"tx_pos":0,"tx_hash":"$txid","value":50000,"isSpentInMempoolTx":false,"status":"confirmed"}]}',
       TestnetCall.arcTx: '{"txid":"$txid","txStatus":"SEEN_ON_NETWORK","blockHash":"","blockHeight":0,"extraInfo":"","status":200,"title":"OK"}',
+      TestnetCall.arcStatus: '{"txid":"$txid","txStatus":"MINED","blockHash":"${'ab' * 32}","blockHeight":5,"extraInfo":"","status":200,"title":"OK"}',
     };
     for (final call in TestnetCall.values) {
       test('10,000 bodies for $call end in a value or a named error', () {

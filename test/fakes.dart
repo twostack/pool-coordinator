@@ -116,13 +116,29 @@ class FakeChain implements ChainAccess {
 
   final dropped = <String>[];
 
+  /// Statuses [statusOf] answers instead of what the fake holds, as ARC's
+  /// own record can differ from the chain's (a broadcast that timed out
+  /// after the network took it).
+  final statuses = <String, TxStatus>{};
+
   @override
-  Future<String> broadcast(Transaction tx) async {
+  Future<TxStatus> statusOf(String txid) async {
+    final s = statuses[txid];
+    if (s != null) return s;
+    if (minedAt.containsKey(txid)) return TxStatus.mined;
+    return known.containsKey(txid) ? TxStatus.seen : TxStatus.unknown;
+  }
+
+  @override
+  Future<String> broadcast(Transaction tx, {Duration? wait}) async {
     await beforeBroadcast?.call(tx);
     final why = refuse?.call(tx);
     if (why != null) throw BroadcastRefusal(name, why);
     broadcasts.add(tx.id);
     log.add('broadcast ${tx.id}');
+    // ARC answers a transaction it has seen mined with MINED, as a node
+    // refuses one already in the chain
+    if (minedAt.containsKey(tx.id)) return 'MINED';
     known[tx.id] = tx;
     // accepted into the mempool: its inputs are spent from now on, mined
     // or not, as a node's mempool would have them

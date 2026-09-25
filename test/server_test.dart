@@ -15,6 +15,7 @@ import 'package:pool_coordinator/src/metrics/metrics_recorder.dart';
 import 'package:pool_coordinator/src/metrics/round_stage.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:test/test.dart';
+import 'package:tstokenlib/src/crypto/stark_prover_ref.dart' show StarkProof;
 import 'package:tstokenlib/tstokenlib.dart';
 
 import 'fakes.dart';
@@ -61,7 +62,9 @@ void main() {
     });
 
     test('both rounds are mined, the feed holds two announcements after the descriptor, and a reader from the descriptor reaches the status\'s header', () async {
-      expect(run.chain.broadcasts, [run.a1.slotId, run.a1.roundId, run.a1.witnessId, run.a2.slotId, run.a2.roundId, run.a2.witnessId]);
+      // the deposit's covenant first: the server broadcasts it at admission (mined already here, so ARC answers MINED)
+      expect(run.chain.broadcasts,
+          [c.depositTx.id, run.a1.slotId, run.a1.roundId, run.a1.witnessId, run.a2.slotId, run.a2.roundId, run.a2.witnessId]);
       for (final id in run.chain.broadcasts) {
         expect(run.chain.minedAt[id], isNotNull);
       }
@@ -266,23 +269,57 @@ void main() {
   });
 
   group('intake', () {
-    test('a covenant not yet mined is refused as such, and nothing is pending', () async {
-      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.minedAt.remove(c.depositTx.id));
+    /// A deposit submission: the fixture's deposit transfer backed by
+    /// [covenant] (the fixture's own by default), and optionally with
+    /// another transfer's proof.
+    Uint8List depositBytes({Transaction? covenant, StarkProof? proof}) {
+      final tx = covenant ?? c.depositTx;
+      final d = c.f.transfers1[0];
+      final t = ShieldedTransfer(d.publics, proof ?? d.proof, d.bundle,
+          depositOutpoint: c.svc.getOutpoint(tx.hash, outputIndex: ShieldedPoolTool.depositVout));
+      return PoolSubmission.of(t, c.f.agg.spendP, depositTx: tx, rng: rng).encode();
+    }
+
+    /// A covenant for the fixture's receipt against PP3_0 from a stranger's
+    /// made-up coins; [salt] makes each a different transaction.
+    Transaction covenant(int salt) {
+      final depositor = strangerKey.publicKey.toAddress(NetworkType.TEST);
+      final coins = Transaction()
+        ..addInputs([TransactionInput(hex.encode(List.filled(32, salt)), 0, 0xffffffff)])
+        ..addOutputs([TransactionOutput(BigInt.from(10000), P2PKHLockBuilder.fromAddress(depositor).getScriptPubkey())]);
+      return c.svc.createDepositTxn(
+          fundingTx: coins,
+          fundingVout: 0,
+          fundingSigner: DefaultTransactionSigner(0x41, strangerKey),
+          fundingPubKey: strangerKey.publicKey,
+          changeAddress: depositor,
+          commitment: c.f.receipt.commitment,
+          satoshis: c.f.receipt.satoshis,
+          pp3Outpoint: c.svc.getOutpoint(c.r0.hash, outputIndex: 3),
+          refundPKH: hex.decode(depositor.pubkeyHash160),
+          refundAfter: 1000);
+    }
+
+    PoolReply replyOf(_Run r, String sender) => PoolReply.decode(r.transport.replies[sender]!.single);
+
+    test('an unmined covenant is admitted: the server broadcasts it, the reply accepts it, and the log and status name only its txid', () async {
+      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.forget(c.depositTx.id));
       try {
-        final s = CoordinatorSetup(c);
-        final bytes = PoolSubmission.of(s.deposit(), c.f.agg.spendP, depositTx: c.depositTx, rng: rng).encode();
-        fresh.transport.send('w1', bytes);
+        final from = logRecords.length;
+        fresh.transport.send('w1', depositBytes());
         await until(() async => fresh.transport.replies['w1'] != null, what: 'a reply');
-        final r = PoolReply.decode(fresh.transport.replies['w1']!.single);
-        expect(r.reason, RefusalReason.depositCovenant);
-        expect(r.sentence, contains('not mined'));
-        expect(fresh.server.co.pending, 0);
-        // a covenant already spent is refused too
-        fresh.chain.minedAt[c.depositTx.id] = 5;
-        fresh.chain.spentOutpoints.add('${c.depositTx.id}:${ShieldedPoolTool.depositVout}');
-        fresh.transport.send('w2', bytes);
-        await until(() async => fresh.transport.replies['w2'] != null, what: 'a reply');
-        expect(PoolReply.decode(fresh.transport.replies['w2']!.single).sentence, contains('spent'));
+        final r = replyOf(fresh, 'w1');
+        expect(r.isAccepted, isTrue, reason: '$r');
+        expect(r.round, 1);
+        expect(fresh.chain.broadcasts, contains(c.depositTx.id), reason: 'the server broadcast the covenant');
+        expect(fresh.server.co.pending, 1);
+        await until(() async => fresh.status()['submissions']['accepted'] == 1, what: 'the status file');
+        final text = '${logRecords.sublist(from).map((l) => l.message).join('\n')}\n${File(fresh.config.server.statusFile).readAsStringSync()}';
+        expect(text, contains(c.depositTx.id));
+        final raw = c.depositTx.serialize();
+        for (int i = 0; i + 17 <= raw.length; i += 4) {
+          expect(text.contains(raw.substring(i, i + 17)), isFalse, reason: 'no piece of the covenant transaction beyond its txid');
+        }
         // garbage in the inbox is marked delivered without a reply, and the next valid one is answered
         fresh.transport.send('w3', [1, 2, 3]);
         fresh.transport.send('w3', Uint8List(0));
@@ -291,10 +328,154 @@ void main() {
         fresh.transport.send('w4', padding);
         await until(() async => fresh.transport.replies['w4'] != null, what: 'a reply');
         expect(fresh.transport.replies['w3'], isNull);
-        expect(PoolReply.decode(fresh.transport.replies['w4']!.single).isAccepted, isTrue);
+        expect(replyOf(fresh, 'w4').isAccepted, isTrue);
         expect(fresh.transport.undelivered, 0);
         expect(fresh.server.status.submissionsDropped, 3);
       } finally {
+        await fresh.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('a mined covenant, as an older wallet sends it, is accepted; one already refunded is refused as spent', () async {
+      final mined = await _Run.fresh(c, rng);
+      try {
+        mined.transport.send('w1', depositBytes());
+        await until(() async => mined.transport.replies['w1'] != null, what: 'a reply');
+        expect(replyOf(mined, 'w1').isAccepted, isTrue, reason: '${replyOf(mined, 'w1')}');
+      } finally {
+        await mined.dispose();
+      }
+      final refunded = await _Run.fresh(c, rng, before: (chain) => chain.spentOutpoints.add('${c.depositTx.id}:${ShieldedPoolTool.depositVout}'));
+      try {
+        refunded.transport.send('w1', depositBytes());
+        await until(() async => refunded.transport.replies['w1'] != null, what: 'a reply');
+        final r = replyOf(refunded, 'w1');
+        expect(r.reason, RefusalReason.depositCovenant);
+        expect(r.sentence, contains('spent'));
+        expect(refunded.server.co.pending, 0);
+      } finally {
+        await refunded.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('a bad proof is never broadcast; a covenant the chain refuses is refused by name, and its place released', () async {
+      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.forget(c.depositTx.id));
+      try {
+        fresh.transport.send('w1', depositBytes(proof: c.f.transfers1[1].proof));
+        await until(() async => fresh.transport.replies['w1'] != null, what: 'a reply');
+        expect(replyOf(fresh, 'w1').reason, RefusalReason.proof);
+        expect(fresh.chain.broadcasts, isNot(contains(c.depositTx.id)), reason: 'nothing broadcast for a refused submission');
+        fresh.chain.refuse = (tx) => tx.id == c.depositTx.id ? 'bad-txns-inputs-missingorspent' : null;
+        fresh.transport.send('w2', depositBytes());
+        await until(() async => fresh.transport.replies['w2'] != null, what: 'a reply');
+        final r = replyOf(fresh, 'w2');
+        expect(r.reason, RefusalReason.depositCovenant);
+        expect(r.sentence, contains('bad-txns-inputs-missingorspent'));
+        expect(fresh.server.co.pending, 0);
+        fresh.chain.refuse = null;
+        fresh.transport.send('w3', depositBytes());
+        await until(() async => fresh.transport.replies['w3'] != null, what: 'a reply');
+        expect(replyOf(fresh, 'w3').isAccepted, isTrue, reason: 'the place was released');
+      } finally {
+        await fresh.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('a deposit and three transfers together: each transfer answered within 2 s, the deposit within 20 s, the round waits for it and stores its covenant, and a start broadcasts the covenant before the round', () async {
+      final fresh = await _Run.fresh(c, rng, before: (chain) {
+        chain.forget(c.depositTx.id);
+        chain.mineOnBroadcast = false;
+        chain.beforeBroadcast = (tx) async {
+          if (tx.id == c.depositTx.id) await Future<void>.delayed(const Duration(seconds: 5));
+        };
+      });
+      try {
+        final t0 = DateTime.now();
+        final seen = <String, Duration>{};
+        fresh.transport.send('d', depositBytes());
+        for (int i = 1; i < 4; i++) {
+          fresh.transport.send('t$i', PoolSubmission.of(c.f.transfers1[i], c.f.agg.spendP, rng: rng).encode());
+        }
+        await until(() async {
+          for (final k in ['t1', 't2', 't3', 'd']) {
+            if (fresh.transport.replies[k] != null) seen.putIfAbsent(k, () => DateTime.now().difference(t0));
+          }
+          return seen.containsKey('t3');
+        }, what: 'the transfers\' replies');
+        for (final k in ['t1', 't2', 't3']) {
+          expect(seen[k], lessThan(const Duration(seconds: 2)), reason: '$k while the covenant is being broadcast');
+          expect(replyOf(fresh, k).isAccepted, isTrue);
+        }
+        expect(seen.containsKey('d'), isFalse, reason: 'the deposit waits for its broadcast');
+        expect(fresh.server.co.building, isNotNull, reason: 'the round is full and closed');
+        expect(fresh.chain.broadcasts, isEmpty, reason: 'nothing is published while the deposit is being admitted');
+        await until(() async => fresh.transport.replies['d'] != null, what: 'the deposit\'s reply', timeout: const Duration(seconds: 25));
+        expect(DateTime.now().difference(t0), lessThan(const Duration(seconds: 20)));
+        expect(replyOf(fresh, 'd').isAccepted, isTrue);
+        await until(() async => fresh.transport.entries.length == 2 && !fresh.server.publishing, what: 'round 1 to be announced');
+        final r1 = (await fresh.store.read(1))!;
+        expect(r1.round.inputs.map((i) => i.prevTxnId), contains(c.depositTx.id));
+        expect(r1.funding.map((f) => f.id), contains(c.depositTx.id), reason: 'admitted unmined, so stored to be broadcast again');
+        await fresh.server.stop();
+        final order = [for (final f in r1.funding) f.id, r1.y.id, r1.round.id, r1.witness.id];
+        expect(order.indexOf(c.depositTx.id), lessThan(order.indexOf(r1.round.id)));
+        final again = await fresh.restart(before: (chain) {
+          for (final id in order) {
+            chain.forget(id);
+          }
+          chain.beforeBroadcast = null;
+        });
+        try {
+          expect(again.chain.broadcasts, order, reason: 'the covenant the network dropped goes before the round that spends it');
+          expect(again.server.status.ready, isTrue);
+        } finally {
+          await again.dispose();
+        }
+      } finally {
+        await fresh.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 5)));
+
+    test('a broadcast that does not answer: refused within the bound when the network does not know it, admitted when it saw it', () async {
+      final fresh = await _Run.fresh(c, rng, admissionBound: const Duration(seconds: 3), before: (chain) {
+        chain.forget(c.depositTx.id);
+        chain.beforeBroadcast = (tx) => Completer<void>().future;
+      });
+      try {
+        final t0 = DateTime.now();
+        fresh.transport.send('w1', depositBytes());
+        await until(() async => fresh.transport.replies['w1'] != null, what: 'a reply', timeout: const Duration(seconds: 10));
+        expect(DateTime.now().difference(t0), lessThan(const Duration(seconds: 4)), reason: 'within the 3 s bound and a poll');
+        expect(replyOf(fresh, 'w1').reason, RefusalReason.depositCovenant);
+        expect(fresh.server.co.pending, 0);
+        fresh.chain.statuses[c.depositTx.id] = TxStatus.seen;
+        fresh.transport.send('w2', depositBytes());
+        await until(() async => fresh.transport.replies['w2'] != null, what: 'a reply', timeout: const Duration(seconds: 10));
+        expect(replyOf(fresh, 'w2').isAccepted, isTrue, reason: '${replyOf(fresh, 'w2')}');
+      } finally {
+        await fresh.dispose();
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+
+    test('more deposits than receipt slots: the extra one is refused and its covenant never broadcast', () async {
+      final held = Completer<void>();
+      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.beforeBroadcast = (tx) => held.future);
+      try {
+        final slots = fresh.server.co.ledger.layout.statement.receiptSlots;
+        final covenants = [for (int i = 0; i <= slots; i++) covenant(0x40 + i)];
+        for (int i = 0; i < slots; i++) {
+          fresh.transport.send('d$i', depositBytes(covenant: covenants[i]));
+        }
+        await until(() async => fresh.server.co.pending == slots, what: 'the slots to be held');
+        fresh.transport.send('extra', depositBytes(covenant: covenants[slots]));
+        await until(() async => fresh.transport.replies['extra'] != null, what: 'a reply');
+        expect(replyOf(fresh, 'extra').reason, RefusalReason.receiptSlots);
+        held.complete();
+        await until(() async => fresh.transport.replies.keys.where((k) => k.startsWith('d')).length == slots, what: 'the held replies');
+        expect(fresh.chain.broadcasts, isNot(contains(covenants[slots].id)));
+        expect(fresh.chain.broadcasts.where((id) => covenants.any((c) => c.id == id)), hasLength(slots));
+      } finally {
+        if (!held.isCompleted) held.complete();
         await fresh.dispose();
       }
     }, timeout: const Timeout(Duration(minutes: 2)));
@@ -311,6 +492,9 @@ void main() {
           again.transport.send('m$i', mutated);
         }
         await until(() async => again.transport.undelivered == 0, timeout: const Duration(minutes: 5), what: 'the inbox to drain');
+        // a deposit's reply follows its admission, after delivery
+        await until(() async => again.transport.replies.length == again.server.status.submissionsAccepted + again.server.status.submissionsRefused,
+            what: 'the deposit replies');
         final s = again.server.status;
         // round 2 already spent the note: the valid one itself would be refused
         expect(s.submissionsAccepted + s.submissionsRefused + s.submissionsDropped, 1000);
@@ -330,11 +514,11 @@ void main() {
 
   group('publishing and stopping', () {
     test('a broadcast refused: the round is not announced, the store holds it, the failure is in the status, and submissions go on; the next start re-broadcasts and announces', () async {
-      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.refuse = (tx) => chain.broadcasts.length == 2 ? 'script failed' : null);
+      final fresh = await _Run.fresh(c, rng, before: (chain) => chain.refuse = (tx) => _published(chain, c).length == 2 ? 'script failed' : null);
       try {
         fresh.submitRound1();
         await until(() async => fresh.status()['lastFailure'] != null && !fresh.server.publishing, what: 'the refused witness');
-        expect(fresh.chain.broadcasts, hasLength(2));
+        expect(_published(fresh.chain, c), hasLength(2));
         expect(fresh.transport.entries, hasLength(1), reason: 'the descriptor only');
         expect(await fresh.store.lastNumber(), 1);
         expect(fresh.server.co.ledger.round, 1);
@@ -371,7 +555,7 @@ void main() {
       try {
         fresh.submitRound1();
         await until(() async => fresh.status()['needsTopUp'] == true, what: 'the funding failure');
-        expect(fresh.chain.broadcasts, isEmpty);
+        expect(_published(fresh.chain, c), isEmpty);
         expect(fresh.server.co.pending, 4, reason: 'pending again');
         final s = fresh.status();
         expect(s['needsTopUp'], isTrue);
@@ -385,16 +569,16 @@ void main() {
     test('stop during a publish: the witness is broadcast before exit', () async {
       final fresh = await _Run.fresh(c, rng, before: (chain) {
         chain.beforeBroadcast = (tx) async {
-          if (chain.broadcasts.length == 1) await Future<void>.delayed(const Duration(milliseconds: 400));
+          if (_published(chain, c).length == 1) await Future<void>.delayed(const Duration(milliseconds: 400));
         };
       });
       try {
         fresh.submitRound1();
-        await until(() async => fresh.chain.broadcasts.length == 1, what: 'Y to be broadcast');
+        await until(() async => _published(fresh.chain, c).length == 1, what: 'Y to be broadcast');
         final sw = Stopwatch()..start();
         await fresh.server.stop();
         expect(sw.elapsed, greaterThanOrEqualTo(const Duration(milliseconds: 300)), reason: 'the stop waited for the publish');
-        expect(fresh.chain.broadcasts, hasLength(3), reason: 'Y, the round and the witness before exit');
+        expect(_published(fresh.chain, c), hasLength(3), reason: 'Y, the round and the witness before exit');
         expect(fresh.transport.entries, hasLength(2), reason: 'announced before exit');
         expect(fresh.transport.closed, isTrue);
         final s = jsonDecode(File(fresh.config.server.statusFile).readAsStringSync());
@@ -735,10 +919,11 @@ void main() {
         final lock = sqlite3.open(fresh.metricsFile)..execute('BEGIN EXCLUSIVE');
         try {
           final from = logRecords.length;
+          final before = fresh.chain.broadcasts.length;
           await fresh._round(2, [for (final t in c.f.transfers2) PoolSubmission.of(t, c.f.agg.spendP, rng: rng).encode()]);
           final a2 = PoolMessage.decode(fresh.transport.entries[2]) as PoolAnnouncement;
           expect(a2.round, 2);
-          expect(fresh.chain.broadcasts.sublist(3), [a2.slotId, a2.roundId, a2.witnessId]);
+          expect(fresh.chain.broadcasts.sublist(before), [a2.slotId, a2.roundId, a2.witnessId]);
           final failures = [for (final r in logRecords.sublist(from)) if (r.loggerName == 'metrics') r.message];
           expect(failures, contains(startsWith('the pool history failed recording round 2')));
           final padding = PoolSubmission.of(c.f.transfers2[1], c.f.agg.spendP, rng: rng).encode();
@@ -1056,6 +1241,10 @@ class _Answered {
 }
 
 /// One server on the fakes, in its own directory.
+/// What the server published for rounds: every broadcast but the fixture's
+/// deposit covenant, which the server broadcasts at admission.
+List<String> _published(FakeChain chain, PoolTestChain c) => [for (final id in chain.broadcasts) if (id != c.depositTx.id) id];
+
 class _Run {
   final PoolTestChain c;
   final Random rng;
@@ -1095,7 +1284,8 @@ class _Run {
       Duration walletDelay = Duration.zero,
       bool api = true,
       String? metricsFile,
-      String serverExtra = ''}) async {
+      String serverExtra = '',
+      Duration admissionBound = const Duration(seconds: 20)}) async {
     final d = dir ?? Directory.systemTemp.createTempSync('pool-server');
     final log = EventLog();
     final ch = chain ?? (FakeChain(log: log)
@@ -1139,11 +1329,14 @@ server:
   funding_timeout_seconds: 60
 $serverExtra${api ? 'api:\n  enabled: true\n  port: 0\n${metricsFile == null ? '' : '  metrics_file: $metricsFile\n'}' : ''}''', baseDir: d.path);
     final store = FileRoundStore(config.store.directory, keepSnapshots: 10);
-    return _Run._(c, rng, d, ch, wallet, t, store, config);
+    return _Run._(c, rng, d, ch, wallet, t, store, config)..admissionBound = admissionBound;
   }
 
+  Duration admissionBound = const Duration(seconds: 20);
+
   Future<void> _start() async {
-    server = await PoolServer.start(config: config, wallet: wallet, store: store, chain: chain, transport: transport, clock: FakeClock());
+    server = await PoolServer.start(
+        config: config, wallet: wallet, store: store, chain: chain, transport: transport, clock: FakeClock(), admissionBound: admissionBound);
     server.metrics?.changes.listen(liveStates.add);
   }
 
@@ -1154,8 +1347,15 @@ $serverExtra${api ? 'api:\n  enabled: true\n  port: 0\n${metricsFile == null ? '
       Duration walletDelay = Duration.zero,
       bool api = true,
       String? metricsFile,
-      String serverExtra = ''}) async {
-    final r = await _make(c, rng, balance: balance, walletDelay: walletDelay, api: api, metricsFile: metricsFile, serverExtra: serverExtra);
+      String serverExtra = '',
+      Duration admissionBound = const Duration(seconds: 20)}) async {
+    final r = await _make(c, rng,
+        balance: balance,
+        walletDelay: walletDelay,
+        api: api,
+        metricsFile: metricsFile,
+        serverExtra: serverExtra,
+        admissionBound: admissionBound);
     before?.call(r.chain);
     await r._start();
     return r;

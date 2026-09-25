@@ -17,6 +17,9 @@ class Answer {
 class FakeHttp {
   late final HttpServer _server;
   final requests = <({String method, String path, String body})>[];
+
+  /// Each request's headers, in the order of [requests].
+  final headers = <Map<String, String>>[];
   final _pending = <HttpRequest>[];
 
   /// Answers by request path (query included); a path with no route is a
@@ -38,6 +41,9 @@ class FakeHttp {
   Future<void> _handle(HttpRequest req) async {
     final body = await utf8.decoder.bind(req).join();
     requests.add((method: req.method, path: req.uri.toString(), body: body));
+    final h = <String, String>{};
+    req.headers.forEach((name, values) => h[name] = values.join(','));
+    headers.add(h);
     if (hang) {
       _pending.add(req);
       return;

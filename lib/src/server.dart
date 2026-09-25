@@ -6,6 +6,7 @@ import 'package:convert/convert.dart';
 import 'package:dartsv/dartsv.dart';
 import 'package:logging/logging.dart';
 import 'package:tstokenlib/src/crypto/stark_kernels.dart' show StarkKernels;
+import 'package:tstokenlib/src/script_gen/pool_deposit_gen.dart' show PoolDepositGen;
 import 'package:tstokenlib/tstokenlib.dart';
 
 import 'chain_access.dart';
@@ -53,6 +54,11 @@ class PoolServer {
   final Logger log;
   final CoordinatorClock clock;
   final ServerStatus status;
+
+  /// How long a deposit's admission may take, broadcast and status query
+  /// together: under the 30 s a wallet waits for its reply (cloak's
+  /// default), with room for intake and the reply's own trip.
+  final Duration admissionBound;
 
   late final ShieldedPoolTool tool;
   late final PoolAggregation plan;
@@ -125,6 +131,7 @@ class PoolServer {
     required this.chain,
     required this.transport,
     required this.clock,
+    this.admissionBound = const Duration(seconds: 20),
     Logger? log,
   })  : log = log ?? Logger('server'),
         status = ServerStatus(transport.peerId);
@@ -137,9 +144,18 @@ class PoolServer {
     required ChainAccess chain,
     required PoolTransport transport,
     CoordinatorClock clock = const SystemClock(),
+    Duration admissionBound = const Duration(seconds: 20),
     Logger? log,
   }) async {
-    final s = PoolServer._(config: config, wallet: wallet, store: store, chain: chain, transport: transport, clock: clock, log: log);
+    final s = PoolServer._(
+        config: config,
+        wallet: wallet,
+        store: store,
+        chain: chain,
+        transport: transport,
+        clock: clock,
+        admissionBound: admissionBound,
+        log: log);
     await s._start();
     return s;
   }
@@ -208,12 +224,13 @@ class PoolServer {
       tool: tool,
       ledger: ledger,
       funding: wallet,
-      store: FundedStore(store, wallet.fundingOf),
+      store: FundedStore(store, _fundingOf),
       publish: _publish,
       owner: wallet.owner,
       ownerPub: wallet.ownerPub,
       clock: clock,
       notify: expired,
+      admitDeposit: _admitCovenant,
     );
     co.chainHeight = await chain.height();
     wallet.requestKind = FundingRequests(() => co.lastTiming).next;
@@ -324,7 +341,7 @@ class PoolServer {
     // would hold that reply for the proof's length, so the batch's replies
     // go first (the wallet's wait for a block used to give them the time)
     final replied = DateTime.now().add(_replyGrace);
-    while (_draining && !_stopping && DateTime.now().isBefore(replied)) {
+    while ((_draining || _depositReplies > 0) && !_stopping && DateTime.now().isBefore(replied)) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
     var logged = false;
@@ -440,9 +457,10 @@ class PoolServer {
   }
 
   /// One message, hostile until the library says otherwise: routed by its
-  /// kind, its deposit confirmed on the chain, taken through the library's
-  /// intake, and answered to its sender. It ends in a reply or a drop,
-  /// never anything else.
+  /// kind, taken through the library's intake, and answered to its sender.
+  /// It ends in a reply or a drop, never anything else. A deposit is
+  /// answered once its covenant is admitted, off this loop, so its
+  /// broadcast holds up no other submission.
   Future<void> _handle(InboxMessage m) async {
     final sender = m.sender;
     try {
@@ -456,62 +474,128 @@ class PoolServer {
         log.info('dropped a message from $sender: not a submission or a catch-up request (${m.payload.length} bytes)');
         return;
       }
-      final reply = await _depositCheck(m.payload) ?? co.submitBytes(m.payload);
-      if (reply == null) {
-        status.submissionsDropped++;
-        log.info('dropped a submission from $sender: no readable id');
+      final reply = co.receiveBytes(m.payload);
+      if (_carriesDeposit(m.payload)) {
+        _depositReplies++;
+        unawaited(reply
+            .then((r) => _answer(m, r))
+            .catchError((Object e, StackTrace st) => _failed(m, e, st))
+            .whenComplete(() => _depositReplies--));
         return;
       }
-      final id = hex.encode(reply.id);
-      if (reply.isAccepted) {
-        status.submissionsAccepted++;
-        _submitters[id] = sender;
-        _accepted.putIfAbsent(reply.round!, () => {}).putIfAbsent(sender, () => []).add(reply.id);
-        log.info('submission $id from $sender: accepted into round ${reply.round}');
-      } else {
-        status.submissionsRefused++;
-        log.info('submission $id from $sender: refused (${reply.reason!.name}): ${reply.sentence}');
-      }
-      await _reply(sender, reply);
+      await _answer(m, await reply);
     } catch (e, st) {
-      // the library ends every submission in a reply or a drop; anything
-      // else is a bug here, and the next message is still served
-      status.fail('message ${m.id} from $sender: $e');
-      log.severe('message ${m.id} from $sender failed unexpectedly: $e', e, st);
+      _failed(m, e, st);
     }
   }
 
-  /// A deposit's covenant must be mined and its output unspent before the
-  /// library, which reads only the bytes, checks the covenant's terms.
-  /// Null when there is nothing to check or it passes.
-  Future<PoolReply?> _depositCheck(Uint8List bytes) async {
-    final PoolSubmission s;
+  /// Deposit replies still waiting for their covenant's admission.
+  int _depositReplies = 0;
+
+  /// Whether [bytes] is a submission carrying a covenant transaction, the
+  /// one kind whose reply waits for the chain.
+  static bool _carriesDeposit(Uint8List bytes) {
     try {
-      s = PoolSubmission.decode(bytes);
+      return PoolSubmission.decode(bytes).depositTx != null;
     } on ProtocolRefusal {
-      return null; // the library names the field
+      return false; // the library names the field
     }
-    if (s.depositTx == null) return null;
-    final List<int>? outpoint;
+  }
+
+  Future<void> _answer(InboxMessage m, PoolReply? reply) async {
+    final sender = m.sender;
+    if (reply == null) {
+      status.submissionsDropped++;
+      log.info('dropped a submission from $sender: no readable id');
+      return;
+    }
+    final id = hex.encode(reply.id);
+    if (reply.isAccepted) {
+      status.submissionsAccepted++;
+      _submitters[id] = sender;
+      _accepted.putIfAbsent(reply.round!, () => {}).putIfAbsent(sender, () => []).add(reply.id);
+      log.info('submission $id from $sender: accepted into round ${reply.round}');
+    } else {
+      status.submissionsRefused++;
+      log.info('submission $id from $sender: refused (${reply.reason!.name}): ${reply.sentence}');
+    }
+    await _reply(sender, reply);
+  }
+
+  void _failed(InboxMessage m, Object e, StackTrace st) {
+    // the library ends every submission in a reply or a drop; anything
+    // else is a bug here, and the next message is still served
+    status.fail('message ${m.id} from ${m.sender}: $e');
+    log.severe('message ${m.id} from ${m.sender} failed unexpectedly: $e', e, st);
+  }
+
+  /// Covenants admitted and not yet stored with a round, by txid.
+  final _covenants = <String, Transaction>{};
+
+  /// The library's admission of a deposit, called only once the submission
+  /// has passed every check, the proof last: the server broadcasts the
+  /// covenant and admits it once the network has seen it. A covenant that
+  /// is mined already (a wallet broadcast it and waited, as before) must
+  /// still be unspent, or its refund has been taken. Everything, the status
+  /// query after a broadcast that did not answer included, ends within
+  /// [admissionBound].
+  Future<String?> _admitCovenant(Transaction tx) async {
+    final sw = Stopwatch()..start();
+    final wait = admissionBound * 3 ~/ 5;
+    TxStatus? seen;
+    Object? trouble;
     try {
-      outpoint = s.transfer(plan.spendP).depositOutpoint;
-    } catch (_) {
-      return null; // the library names the field
+      seen = await broadcastSeen(chain, tx, wait: wait).timeout(wait + admissionBound ~/ 10);
+    } on BroadcastRefusal catch (e) {
+      log.info('deposit covenant ${tx.id}: refused by the chain');
+      return 'the chain refused the covenant ${tx.id}: ${e.reason}';
+    } catch (e) {
+      trouble = e is TimeoutException ? 'no answer within ${sw.elapsed.inSeconds} s' : e;
     }
-    if (outpoint == null) return null; // the library refuses the stray covenant
-    final txid = hex.encode(outpoint.sublist(0, 32).reversed.toList());
-    final vout = ByteData.sublistView(Uint8List.fromList(outpoint), 32).getUint32(0, Endian.little);
-    try {
-      if (await chain.minedHeight(txid) == null) {
-        return PoolReply.refused(s.id, RefusalReason.depositCovenant, 'the deposit covenant $txid is not mined');
+    if (seen == null) {
+      try {
+        seen = await chain.statusOf(tx.id).timeout(admissionBound - sw.elapsed);
+      } catch (e) {
+        log.info('deposit covenant ${tx.id}: not admitted, its broadcast and its status both unanswered');
+        return 'the covenant ${tx.id} could not be broadcast ($trouble), and its status could not be asked ($e)';
       }
-      if (!await chain.unspent(txid, vout)) {
-        return PoolReply.refused(s.id, RefusalReason.depositCovenant, 'the deposit covenant output $txid:$vout is spent');
+      if (seen == TxStatus.unknown) {
+        log.info('deposit covenant ${tx.id}: not admitted, the network does not know it');
+        return 'the covenant ${tx.id} could not be broadcast: $trouble';
       }
-    } on ChainError catch (e) {
-      return PoolReply.refused(s.id, RefusalReason.depositCovenant, 'the deposit covenant could not be checked on the chain ($e)');
     }
+    if (seen == TxStatus.mined) {
+      for (int v = 0; v < tx.outputs.length; v++) {
+        if (PoolDepositGen.parse(tx.outputs[v].script.buffer) == null) continue;
+        try {
+          if (!await chain.unspent(tx.id, v).timeout(admissionBound - sw.elapsed)) {
+            log.info('deposit covenant ${tx.id}: refused, its covenant output is spent');
+            return 'the deposit covenant output ${tx.id}:$v is spent';
+          }
+        } catch (e) {
+          return 'the deposit covenant ${tx.id}:$v could not be checked on the chain ($e)';
+        }
+      }
+    }
+    // a mined covenant needs no broadcast again; an unmined one is kept
+    // for the round's funding list
+    if (seen == TxStatus.seen) _covenants[tx.id] = tx;
+    log.info('deposit covenant ${tx.id}: admitted, ${seen == TxStatus.mined ? 'mined' : 'seen by the network'}, '
+        'in ${sw.elapsedMilliseconds} ms');
     return null;
+  }
+
+  /// A round's funding as the store keeps it: the wallet's, then the
+  /// covenants admitted unmined that the round transaction spends, so a start or a re-broadcast
+  /// sends a covenant the network dropped before the round that needs it.
+  List<Transaction> _fundingOf(List<Transaction> spenders) {
+    final round = spenders[1];
+    final covenants = <Transaction>[];
+    for (final i in round.inputs) {
+      final c = _covenants.remove(i.prevTxnId);
+      if (c != null) covenants.add(c);
+    }
+    return [...wallet.fundingOf(spenders), ...covenants];
   }
 
   Future<void> _reply(String sender, PoolReply reply) async {
