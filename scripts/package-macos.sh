@@ -23,14 +23,14 @@ OUT="build/dist/${DIR}-macos-arm64.tar.gz"
 
 echo "== pool-coordinator ${VERSION} (macOS arm64)"
 resolve_dependencies
-KERNELS="$(build_kernels --features metal)"
+build_bundle
 SITE="$(web_dist)"
 
 umask 022
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/lib"
-compile_binary "$STAGE/bin/pool-coordinator"
-install -m 644 "$KERNELS" "$STAGE/lib/"
+install -m 755 "$BUNDLE/bin/pool_coordinator" "$STAGE/bin/pool-coordinator"
+install -m 644 "$BUNDLE"/lib/* "$STAGE/lib/"
 cp -R "$SITE" "$STAGE/web"
 install -m 644 config.example.yaml deploy/Caddyfile "$STAGE/"
 

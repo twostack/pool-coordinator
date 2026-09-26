@@ -104,8 +104,10 @@ step "4.2 create and run a pool on localnet"
 inside "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl" >/dev/null
 (cd "$root" && exec dart run tool/ricochet_up.dart) >"$work/ricochet.out" 2>&1 &
 pids+=($!)
-for ((i = 0; i < 60; i++)); do grep -q '^ricochet ' "$work/ricochet.out" && break; sleep 1; done
-read -r _ rport rpeer < <(grep '^ricochet ' "$work/ricochet.out") || { cat "$work/ricochet.out"; fail "ricochet server"; }
+# dart run prints its hook progress without a newline, so the line may not
+# start the output
+for ((i = 0; i < 60; i++)); do grep -qE 'ricochet [0-9]+ ' "$work/ricochet.out" && break; sleep 1; done
+read -r _ rport rpeer < <(grep -oE 'ricochet [0-9]+ [[:alnum:]]+' "$work/ricochet.out") || { cat "$work/ricochet.out"; fail "ricochet server"; }
 hostip=$(inside "getent ahostsv4 host.docker.internal | awk 'NR==1{print \$1}'")
 inside "sed -i -e 's#rpc_url: .*#rpc_url: http://host.docker.internal:18332#' \
   -e 's#server: /ip4/.*#server: /ip4/$hostip/udp/$rport/udx/p2p/$rpeer#' /etc/pool-coordinator/config.yaml"
@@ -117,8 +119,8 @@ inside "cd /var/lib/pool-coordinator && runuser -u pool-coordinator -- /opt/pool
 pids+=($!)
 funded=
 for ((i = 0; i < 600; i++)); do
-  if [ -z "$funded" ] && m=$(inside "grep -o 'fund [^ ]* with at least [0-9]*' /tmp/create.log" 2>/dev/null); then
-    addr=$(awk '{print $2}' <<<"$m"); need=$(awk '{print $6}' <<<"$m")
+  if [ -z "$funded" ] && m=$(inside "grep -oE 'fund [^ ]* with (one payment of )?at least [0-9]*' /tmp/create.log" 2>/dev/null); then
+    addr=$(awk '{print $2}' <<<"$m"); need=$(awk '{print $NF}' <<<"$m")
     node sendtoaddress "[\"$addr\", $(awk -v n="$need" 'BEGIN{printf "%.8f", 2*n/1e8}')]" >/dev/null
     funded=1; ok "funded the pool's address"
   fi

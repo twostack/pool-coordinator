@@ -3,12 +3,13 @@ import 'dart:io';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:tstokenlib/src/crypto/stark_kernels.dart';
 
+import 'build_version.dart';
 import 'metrics/sqlite_library.dart';
 
-/// The release this binary was built as (`dart compile exe
-/// -DPOOL_VERSION=X.Y.Z`), or `dev` for a build from source that set none,
-/// so an operator and a bug report can tell the two apart.
-const poolVersion = String.fromEnvironment('POOL_VERSION', defaultValue: 'dev');
+/// The release this binary was built as (`lib/src/build_version.dart`, which
+/// the release build writes), or `dev` for a build from source, so an
+/// operator and a bug report can tell the two apart.
+const poolVersion = buildVersion;
 
 /// Why the kernels did not load, naming the file and every place it was
 /// looked for, so an operator can see which one should have held it. `check`

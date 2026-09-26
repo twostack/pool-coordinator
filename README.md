@@ -21,7 +21,7 @@ POOL_WALLET_PASSPHRASE=... POOL_RPC_PASSWORD=... dart run bin/pool_coordinator.d
 
 `create` generates the owner key and the ricochet identity, writes the wallet and identity files, waits for the printed address to be funded, issues the pool, writes the genesis txids into the configuration and puts the descriptor on the feed. `run` opens or recovers the pool and serves it until SIGINT or SIGTERM. The status is in the configured status file; the log goes to stderr.
 
-The library's native kernels are needed at run time (the note encryption and the provers use them): build tstokenlib's `native/stark_kernels` (in the sibling checkout, or in the pub cache, where the crate ships as source) and set `STARK_KERNELS_LIB` to the library file. With tstokenlib checked out beside this repo a `native` symlink to `../tstokenlib/native` also works, which is what the tests here use; it is machine-local and not committed. `STARK_KERNELS_GPU=1` proves on the GPU.
+The library's native kernels are needed at run time (the note encryption and the provers use them). tstokenlib's build hook provides them to `dart run`, `dart test` and `dart build cli`: the prebuilt library its version pins, or one built with cargo when the crate has been edited, so a development checkout needs nothing set. `STARK_KERNELS_LIB` still points the program at another library file. `STARK_KERNELS_GPU=1` proves on the GPU.
 
 Wallets are also answered beyond submission replies: catch-up requests (the head, the frontier, block roots, a mined round by number) at the last mined round, and each submitter is sent its round when it is mined. Protocol version 3, from tstokenlib; the status file counts them under `catchUp`.
 

@@ -25,8 +25,7 @@ resolve_dependencies() {
     fi
 }
 
-# Where the resolved tstokenlib is, from the package config: its kernel crate
-# ships in the package as source.
+# Where the resolved tstokenlib is, from the package config.
 tstokenlib_root() {
     python3 - <<'PY'
 import json
@@ -41,18 +40,25 @@ print(root.rstrip('/'))
 PY
 }
 
-# Builds the kernels into build/kernels (outside the pub cache) and prints
-# the library's path. Extra cargo arguments (--features metal) pass through.
-build_kernels() {
-    local crate
-    crate="$(tstokenlib_root)/native/stark_kernels"
-    cargo build --release --locked --manifest-path "$crate/Cargo.toml" --target-dir build/kernels "$@" >&2
-    local lib
-    for lib in build/kernels/release/libstark_kernels.so build/kernels/release/libstark_kernels.dylib; do
-        if [ -f "$lib" ]; then echo "$lib"; return; fi
-    done
-    echo "ERROR: the kernel build produced no library" >&2
-    exit 1
+# Builds the program with `dart build cli` into build/cli/bundle: bin/pool_coordinator,
+# and in lib/ the kernels library tstokenlib's build hook provides (the
+# prebuilt one the locked tstokenlib pins by SHA-256, or one built from its
+# crate when none is listed; the Mac's carries the Metal GPU path). VERSION is
+# written into lib/src/build_version.dart for the build, since `dart build cli`
+# takes no --define, and the committed file is put back before anything else,
+# the build's failure included.
+BUNDLE=build/cli/bundle
+build_bundle() {
+    local version_file=lib/src/build_version.dart status=0
+    cp "$version_file" "$version_file.committed"
+    printf "// Written by scripts/common.sh for a release build; see the committed file.\nconst buildVersion = '%s';\n" "$VERSION" > "$version_file"
+    rm -rf build/cli
+    dart build cli --target bin/pool_coordinator.dart -o build/cli >&2 || status=$?
+    mv -f "$version_file.committed" "$version_file"
+    if [ "$status" -ne 0 ]; then
+        echo "ERROR: dart build cli failed ($status)" >&2
+        exit "$status"
+    fi
 }
 
 # The built web site: WEB_DIST if given (the release workflow builds it
@@ -63,11 +69,4 @@ web_dist() {
         (cd web && npm ci && npm run build) >&2
     fi
     echo web/dist
-}
-
-# Compiles the coordinator with its version built in.
-compile_binary() {
-    local out="$1"
-    mkdir -p "$(dirname "$out")"
-    dart compile exe -DPOOL_VERSION="$VERSION" bin/pool_coordinator.dart -o "$out" >&2
 }

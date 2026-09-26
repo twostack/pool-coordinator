@@ -21,8 +21,7 @@ OUT="build/dist/${NAME}_${VERSION}_${ARCH}.deb"
 
 echo "== ${NAME} ${VERSION} (${ARCH})"
 resolve_dependencies
-# shellcheck disable=SC2119  # no extra cargo arguments on Linux
-KERNELS="$(build_kernels)"
+build_bundle
 SITE="$(web_dist)"
 
 umask 022
@@ -30,8 +29,8 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/$NAME/bin" "$ROOT/opt/$NAME/lib" "$ROOT/opt/$NAME/share" \
     "$ROOT/usr/bin" "$ROOT/etc/supervisor/conf.d"
 
-compile_binary "$ROOT/opt/$NAME/bin/$NAME"
-install -m 644 "$KERNELS" "$ROOT/opt/$NAME/lib/"
+install -m 755 "$BUNDLE/bin/pool_coordinator" "$ROOT/opt/$NAME/bin/$NAME"
+install -m 644 "$BUNDLE"/lib/* "$ROOT/opt/$NAME/lib/"
 install -m 755 deploy/debian/run.sh "$ROOT/opt/$NAME/run.sh"
 cp -R "$SITE" "$ROOT/opt/$NAME/web"
 install -m 644 deploy/Caddyfile deploy/debian/config.example.yaml deploy/debian/env.example "$ROOT/opt/$NAME/share/"

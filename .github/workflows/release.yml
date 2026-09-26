@@ -91,23 +91,18 @@ jobs:
       - name: Dependencies, as the committed lockfile pins them
         run: dart pub get --enforce-lockfile
 
-      # before the suite, which needs them (ML-KEM is native only)
-      - name: The native kernels, from the pinned tstokenlib
-        run: |
-          . scripts/common.sh
-          if [ "${{ matrix.package }}" = macos ]; then lib=$(build_kernels --features metal); else lib=$(build_kernels); fi
-          echo "STARK_KERNELS_LIB=$PWD/$lib" >> "$GITHUB_ENV"
-          echo "TSTOKENLIB_ROOT=$(tstokenlib_root)" >> "$GITHUB_ENV"
-
       - name: Analyze
         run: dart analyze lib bin test
+      # tstokenlib's build hook provides the kernels the suite needs (ML-KEM is
+      # native only): the prebuilt library the lock pins, or one built with cargo
       - name: Test
         run: dart test
 
       # the kernels' proofs are the Dart kernels', byte for byte, on this platform
-      - name: tstokenlib's native byte-identity test against the built kernels
+      - name: tstokenlib's native byte-identity test against the hook's kernels
         run: |
-          cp -R "$TSTOKENLIB_ROOT" "$RUNNER_TEMP/tstokenlib"
+          . scripts/common.sh
+          cp -R "$(tstokenlib_root)" "$RUNNER_TEMP/tstokenlib"
           cd "$RUNNER_TEMP/tstokenlib"
           dart pub get
           dart test test/stark_kernels_test.dart
