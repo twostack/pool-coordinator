@@ -59,10 +59,10 @@
 
 ## 6. cloak-cli (in ../cloak-cli)
 
-- [ ] 6.1 Open a cloak-cli OpenSpec change modifying `deposits` "A deposit is submitted once its covenant is mined" into one-command submission with the fallback of design 6. Verify `openspec validate` there.
-- [ ] 6.2 Implement design 6 in `runDeposit` and `submitWaitingDeposits`, including the status `submitting`, a `depositPending` refusal treated as accepted, and the funding coins released only when the chain does not know the covenant. Verify against an in-process coordinator on the new behaviour: accepted in one command, nothing broadcast by cloak.
-- [ ] 6.3 Verify the fallback against the old behaviour: a coordinator stub that refuses "is not mined" makes cloak broadcast and report the old two-step flow. A refused deposit whose covenant the chain does not know leaves the funding coin spendable (`cloak balance`).
-- [ ] 6.4 Update cloak's README deposit section: one command, what a refusal leaves, and `--broadcast` as the fallback. Verify the README's commands against `cloak deposit --help`.
+- [x] 6.1 Open a cloak-cli OpenSpec change modifying `deposits` "A deposit is submitted once its covenant is mined" into one-command submission with the fallback of design 6. Verify `openspec validate` there.
+- [x] 6.2 Implement design 6 in `runDeposit` and `submitWaitingDeposits`, including the status `submitting`, a `depositPending` refusal treated as accepted, and the funding coins released only when the chain does not know the covenant. Verify against an in-process coordinator on the new behaviour: accepted in one command, nothing broadcast by cloak.
+- [x] 6.3 Verify the fallback against the old behaviour: a coordinator stub that refuses "is not mined" makes cloak broadcast and report the old two-step flow. A refused deposit whose covenant the chain does not know leaves the funding coin spendable (`cloak balance`).
+- [x] 6.4 Update cloak's README deposit section: one command, what a refusal leaves, and `--broadcast` as the fallback. Verify the README's commands against `cloak deposit --help`.
 
 ## 7. End to end and measurement
 
