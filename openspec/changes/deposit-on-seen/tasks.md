@@ -67,7 +67,7 @@
 ## 7. End to end and measurement
 
 - [x] 7.1 Extend `test/localnet_e2e_test.dart`: a round-1 deposit submitted unmined through ricochet is admitted, the round is mined with its receipt, and no block is mined between the submission and the reply. Verify it fails against the current server.
-- [ ] 7.2 Run cloak-cli's localnet e2e against the new server: `cloak deposit` then `cloak sync`, with no block mined in between, yields the depositor's note once the round is mined.
+- [x] 7.2 Run cloak-cli's localnet e2e against the new server: `cloak deposit` then `cloak sync`, with no block mined in between, yields the depositor's note once the round is mined. Done: passed with the deposit answered in 485 ms, and in 364 ms against the signed cloak 0.1.5.
 - [ ] 7.3 Measure on testnet after the release, with scratchpad `deposit_latency.sh`:
   - ten deposits' reply times;
   - the covenant's ARC broadcast time;
