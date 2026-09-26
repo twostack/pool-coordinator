@@ -72,6 +72,9 @@ class PoolServer {
   /// The publish sequence of the round being published, awaited by [stop].
   Completer<void>? _publishing;
 
+  /// The library's last failure already taken into the status.
+  RoundFailure? _seenFailure;
+
   /// Who submitted each accepted transfer, by submission id, for the
   /// expired replies the library hands back at close. Cleared as rounds
   /// publish.
@@ -737,7 +740,12 @@ class PoolServer {
     status.tipWitness = co.ledger.tipWitness.id;
     status.wallet = wallet.report;
     final f = s.lastFailure;
-    if (f != null && '$f' != status.lastFailure) status.fail('$f');
+    // each of the library's failures once, and not over the server's own
+    // account of it, which names the transaction and its txid
+    if (f != null && !identical(f, _seenFailure)) {
+      _seenFailure = f;
+      if (!(status.lastFailure?.contains(f.reason) ?? false)) status.fail('$f');
+    }
     status.needsTopUp = (f != null && f.stage == 'funding') || wallet.roundsLeft == 0 || wallet.report.needsTopUp;
     status.stopping = _stopping;
     try {

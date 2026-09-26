@@ -534,6 +534,9 @@ void main() {
         fresh.transport.send('w5', padding);
         await until(() async => fresh.transport.replies['w5'] != null, what: 'a reply');
         expect(PoolReply.decode(fresh.transport.replies['w5']!.single).round, 2);
+        await until(() async => fresh.status()['pending'] == 1, what: 'the status after the reply');
+        expect(fresh.status()['lastFailure'], contains('witness'),
+            reason: 'a later refresh keeps the server\'s account of the refusal, which names the transaction');
         // the next start broadcasts the witness and announces round 1
         await fresh.server.stop();
         fresh.chain.refuse = null;
