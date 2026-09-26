@@ -459,3 +459,33 @@ The suite dominates each job. The site builds once in 19 s and publishing takes 
 - **One entitlement.** The binary needs `allow-unsigned-executable-memory`: the Dart AOT runtime maps its snapshot as executable memory without MAP_JIT, and it is killed at start with no entitlement and with `allow-jit` alone.
 - **The flow.** The workflow now leaves the release a draft. `scripts/sign-macos-release.sh` makes the image from the tarball built on the runner, notarizes and staples it, checks it as a downloader gets it, and swaps it in with a rewritten `SHA256SUMS`. v0.1.0's tarball was replaced this way; notarization took about a minute, and the `.deb` checksums are unchanged.
 
+
+## 2026-09-26: deposits admitted once the network has seen them (change `deposit-on-seen`)
+
+A deposit used to wait for a block. cloak broadcast the covenant, waited for it to be mined, and a later `cloak sync` submitted it. On 2026-09-25 that took about 11 minutes, plus the manual step. A covenant also names exactly one round, through the PP3 of the round before it. If that round closed while the covenant waited for its block, the deposit could never be taken in and stayed locked until its refund, 144 blocks later. That happened live: a 15,000 satoshi deposit was refused as `depositTarget` because round 5 closed first, and it is refundable only from block 1760043.
+
+**The decision.** The depositor hands the covenant to the coordinator unbroadcast, and the coordinator broadcasts it. The coordinator admits the deposit once ARC reports it `SEEN_ON_NETWORK` or better. The block wait only guarded against the covenant being double-spent before its round is mined. On BSV that guard is not needed once the network has seen the transaction: under Teranode a conflicting spend is detected and dropped long before the next block. The coordinator must be the one that broadcasts, so that it knows the network has seen exactly the bytes its round will spend.
+
+**How it is built.**
+- **tstokenlib reserves the place.** `ShieldedCoordinator` has an optional `admitDeposit` hook (tstokenlib 2.0.2 and 2.2.0, change `deposit-admission`). A deposit that passes every check, the spend proof last, holds its place in the pending round while the hook runs: capacity, a receipt slot, its covenant and its nullifiers. A round closed meanwhile waits in a new first stage, `admission`, and builds without a refused deposit, with padding in its place. Nothing is broadcast for a submission that fails a check, so an inbox anyone can write to cannot make the coordinator broadcast arbitrary transactions.
+- **The server's hook.** `_admitCovenant` broadcasts with `X-MaxTimeout` at 3/5 of a 20 s bound. After a timeout, a `ChainError` or an "already known" refusal, it asks the chain for the covenant's status by txid once (ARC `GET /v1/tx/{txid}`, the node's verbose `getrawtransaction`). Seen admits. Mined admits only if the covenant's outputs are unspent, so a covenant spent by its refund cannot be admitted. Unknown refuses with the chain's words.
+- **Replies leave the drain loop.** A deposit's reply is sent when its admission ends, and the inbox moves on meanwhile, so other submissions keep their 2 s bound. Funding a round waits for deposit replies still open.
+- **Covenants admitted unmined join the round's funding list.** A restart or a mempool drop broadcasts them again before the round that spends them. The store's format is unchanged.
+- **cloak.** `cloak deposit` is one command from cloak 0.1.5: build, record, hand over, report. A coordinator from before this change refuses with "is not mined", and cloak then broadcasts the covenant itself, which is the old flow. A refusal before the network knew the covenant gives its coins back.
+
+**The rejected alternative: all in the server.** The server would check what it could, broadcast, then call the library's synchronous intake, with no library release. It was rejected because the round can close during the broadcast, by its deadline or by other transfers filling it. The covenant would then be on the network naming a spent PP3 and locked for a day, which is the failure this change removes. It would also verify the proof twice. Holding the round open from the server was also rejected: the library closes rounds from inside its intake and its own alarm, and has no way to defer a close.
+
+**Measured.**
+
+| Where | Deposit handed over to accepted |
+|---|---|
+| Coordinator localnet e2e (`test/localnet_e2e_test.dart`), no block mined before the reply | 389 ms |
+| cloak localnet e2e against this server, cloak built from source | 485 ms |
+| cloak localnet e2e, signed cloak 0.1.5 | 364 ms (4.8 s the whole command) |
+| Testnet, overmedia on 0.1.8, cloak 0.1.5, covenant `313fbd60…` | 1,254 ms |
+
+The testnet deposit was admitted at 05:36:57Z on 2026-09-26 and accepted into round 8 0.3 ms later. Almost all of the 1.25 s is ARC's wait for `SEEN_ON_NETWORK`, against the 4 to 5 s the design assumed from live round 2. Round 8 was announced at 05:47:30Z and mined in the next block, 1759946. With its two transfers it built in 41.4 s, against 41.5 s for round 7 with none. That deposit arrived ten minutes before the close, so the `admission` stage had nothing to wait for.
+
+**Not yet measured (task 7.3).** The single testnet sample is not a distribution: the median and maximum of ten deposits, and a round's close-to-announcement time with a deposit admitted during the close, are still to come. If the maximum reply time exceeds 15 s, `X-MaxTimeout` moves toward 20 s and the bound toward 25 s, still under cloak's 30 s. ARC's live wording for "already known" has not been seen yet; the status query decides any refusal the pattern misses.
+
+**A fault the release run found.** The first v0.1.8 CI run failed the test bounding a deposit's reply at 20 s, with 21.6 s. The test's own polling loop was blocked by the proving that followed, so it saw the reply late. It now measures from when the transport sent the reply, and v0.1.8 was tagged again before anything was released.
