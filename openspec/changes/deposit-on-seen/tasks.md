@@ -78,10 +78,12 @@
 ## 8. Release and record
 
 - [ ] 8.1 Write the dated docs/DESIGN.md section for this change: the decision, the rejected server-only alternative and why, and the measured numbers from 7.3.
-- [ ] 8.2 Release, following the release flow once the user approves publishing tstokenlib 2.0.2:
+- [x] 8.2 Release, following the release flow once the user approves publishing tstokenlib 2.0.2:
   - cherry-pick to release/0.1 with the lock moved to 2.0.2;
   - release 0.1.8 and install it on overmedia;
   - run a smoke round with a real `cloak deposit`.
 
   Verify the deposit is accepted with no block between the submission and the reply, and the round announced.
-- [ ] 8.3 Release cloak-cli with the new flow. Verify a fresh install deposits into the live pool in one command.
+
+  Done: live round 8 (mined at 1759946) took the user's cloak 0.1.5 deposits (2 transfers, balance 260,001 → 315,001).
+- [x] 8.3 Release cloak-cli with the new flow. Verify a fresh install deposits into the live pool in one command.
